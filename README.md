@@ -217,12 +217,24 @@ If `/sys/kernel/btf/vmlinux` is absent (no `CONFIG_DEBUG_INFO_BTF`), install
 
 ## Run
 
-### ClickHouse (storage)
-Containerised:
+> **Deployment model:** everything runs **bare-metal on the Proxmox host** — no
+> Docker, no VM. The collector must be on the host (XDP needs the host kernel +
+> NICs), and ClickHouse is installed natively alongside it.
+
+### ClickHouse (storage, native)
+Proxmox VE 8 is Debian 12, so use the official ClickHouse APT repo:
 ```bash
-cd deploy && docker compose up -d        # ClickHouse on 127.0.0.1:8123
+sudo bash deploy/install-clickhouse.sh        # adds repo, installs, starts, caps RAM
 ```
-…or install ClickHouse natively. The collector creates the schema on startup.
+This listens on `127.0.0.1:8123` (HTTP) and `:9000` (native), with the default
+user and no password — matching the collector defaults. The collector creates
+the `netmon` database + tables on startup.
+
+> ClickHouse can be RAM-hungry; the install script drops a
+> `config.d/netmon-limits.xml` capping server memory (default 2 GiB) since this
+> is a hypervisor. Tune it for your host. If you'd rather not run storage on the
+> host at all, point `--clickhouse` at a ClickHouse on another machine — only
+> the collector has to live on the Proxmox host.
 
 ### Collector (on the host, as root)
 ```bash
@@ -324,7 +336,7 @@ collector/   C++ control plane:
                clickhouse_client  batched JSONEachRow inserts
                json               shared single-line JSON builder
 clickhouse/  schema.sql           tables + rollup MV (auto-applied)
-deploy/      systemd unit, run wrapper, tap refresher, docker-compose (ClickHouse)
+deploy/      systemd unit, run wrapper, tap refresher, install-clickhouse.sh
 config/      collector.env
 Makefile     eBPF + skeleton + collector orchestration
 ```
