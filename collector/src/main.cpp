@@ -114,8 +114,8 @@ static std::string load_schema() {
 }
 
 struct PrevState {
-    flow_stats stats;
-    bool       seen_this_round = false;
+    nm_flow_stats stats;
+    bool          seen_this_round = false;
 };
 
 int main(int argc, char** argv) {

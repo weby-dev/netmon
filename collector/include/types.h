@@ -13,8 +13,8 @@ namespace netmon {
 // A per-interval view of one flow, enriched by the collector before it is
 // handed to the aggregator / security engine / ClickHouse writer.
 struct FlowSample {
-    flow_key   key;
-    flow_stats stats;          // absolute kernel counters at scrape time
+    flow_key      key;
+    nm_flow_stats stats;       // absolute kernel counters at scrape time
 
     uint64_t   d_packets = 0;  // delta since previous scrape
     uint64_t   d_bytes   = 0;

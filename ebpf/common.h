@@ -106,7 +106,9 @@ struct flow_key {
 } __attribute__((packed));
 
 /* ---- Per-flow statistics ------------------------------------------------ */
-struct flow_stats {
+/* Prefixed nm_ to avoid colliding with the kernel's own `struct flow_stats`
+ * pulled in via vmlinux.h on recent kernels. */
+struct nm_flow_stats {
     __u64 packets;
     __u64 bytes;
     __u64 first_seen_ns;  /* bpf_ktime_get_ns() of first packet             */

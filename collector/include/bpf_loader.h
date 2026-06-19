@@ -18,8 +18,8 @@ struct Config;
 
 // One scraped entry from the kernel flow_map.
 struct FlowEntry {
-    flow_key   key;
-    flow_stats stats;
+    flow_key      key;
+    nm_flow_stats stats;
 };
 
 // Owns the loaded/attached BPF objects and exposes typed access to the maps.

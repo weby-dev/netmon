@@ -31,7 +31,7 @@ struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, MAX_FLOWS);
     __type(key, struct flow_key);
-    __type(value, struct flow_stats);
+    __type(value, struct nm_flow_stats);
 } flow_map SEC(".maps");
 
 struct {
@@ -286,7 +286,7 @@ int xdp_monitor(struct xdp_md *ctx)
 
     /* Update (or create) the flow record. */
     __u64 pkt_index;
-    struct flow_stats *fs = bpf_map_lookup_elem(&flow_map, &key);
+    struct nm_flow_stats *fs = bpf_map_lookup_elem(&flow_map, &key);
     if (fs) {
         pkt_index = __sync_fetch_and_add(&fs->packets, 1) + 1;
         __sync_fetch_and_add(&fs->bytes, pkt_len);
@@ -295,7 +295,7 @@ int xdp_monitor(struct xdp_md *ctx)
         if (is_syn) __sync_fetch_and_add(&fs->syn_count, 1);
         if (is_rst) __sync_fetch_and_add(&fs->rst_count, 1);
     } else {
-        struct flow_stats nf = {};
+        struct nm_flow_stats nf = {};
         nf.packets       = 1;
         nf.bytes         = pkt_len;
         nf.first_seen_ns = now;
