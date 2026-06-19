@@ -17,9 +17,18 @@
  * __u8/__u16/__u32/__u64 fixed-width types (the BPF translation unit defines
  * NETMON_BPF before including us). For the C++ userspace build, pull them in
  * from <linux/types.h>.
+ *
+ * We also pull in the system networking headers here (userspace only) BEFORE
+ * the protocol/address-family fallback macros below. glibc defines IPPROTO_*
+ * and AF_* both as enum values AND as self-referential macros
+ * (e.g. `#define IPPROTO_ICMP IPPROTO_ICMP`), so the `#ifndef` guards below
+ * then correctly skip and never clobber those enums. The fallback macros only
+ * take effect on the BPF side, where vmlinux.h does not provide them.
  */
 #ifndef NETMON_BPF
 #include <linux/types.h>
+#include <netinet/in.h>   /* IPPROTO_* (enum + macros) */
+#include <sys/socket.h>   /* AF_INET / AF_INET6 (macros) */
 #endif
 
 /* ---- EtherTypes --------------------------------------------------------- */

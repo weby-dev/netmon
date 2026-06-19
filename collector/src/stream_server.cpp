@@ -277,7 +277,9 @@ void StreamServer::update_interest(Client& c) {
     if (need_out == c.epollout) return;
     c.epollout = need_out;
     epoll_event ev{};
-    ev.events = EPOLLIN | (need_out ? EPOLLOUT : 0);
+    uint32_t flags = EPOLLIN;
+    if (need_out) flags |= EPOLLOUT;
+    ev.events = flags;
     ev.data.fd = c.fd;
     epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, c.fd, &ev);
 }
