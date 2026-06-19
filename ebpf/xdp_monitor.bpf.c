@@ -130,18 +130,24 @@ sample_l7(struct xdp_md *ctx, const struct flow_key *key, __u8 hint,
     if (payload_off >= total)
         return;                                 /* no payload */
 
-    /* Length of the captured payload, clamped to [1, L7_SNAP_LEN-1]. Do the
-     * clamp and the zero-check in u64 space and only THEN narrow to u32. That
-     * yields a size the verifier sees as both non-negative (smin >= 0) and
-     * non-zero (umin >= 1) — bpf_xdp_load_bytes() rejects a size that might be
-     * either. (A u32 min-clamp tripped "min value is negative"; a bitmask
-     * tripped "invalid zero-sized read".) */
-    __u64 avail = total - (__u64)payload_off;
-    if (avail > (L7_SNAP_LEN - 1))
-        avail = (L7_SNAP_LEN - 1);
-    if (avail == 0)
-        return;
-    __u32 caplen = (__u32)avail;
+    /* Compute the capture length, clamped to [1, L7_SNAP_LEN-1], in a form the
+     * verifier accepts as the size arg to bpf_xdp_load_bytes(), which requires
+     * smin >= 0 AND umin >= 1 AND umax <= the destination size.
+     *
+     * The naive forms both fail: a bitmask leaves the value as a tnum
+     * (0; 0xff) whose umin stays 0 ("invalid zero-sized read"), and a plain
+     * `if (len == 0) return;` does NOT raise umin for such a value (the
+     * verifier only tightens umin/umax on unsigned >/< against a constant, and
+     * the compiler folds `>= 1` into `!= 0`). So we bound (len - 1) against a
+     * NON-zero constant (kept as JGT, honored by the verifier), then add 1
+     * back: the +1 shifts the tracked minimum from 0 to 1. payload_off < total
+     * here, so avail >= 1 at runtime and the (avail - 1) underflow branch is
+     * never actually taken. */
+    __u64 avail = total - (__u64)payload_off;        /* >= 1 at runtime       */
+    __u64 capm1 = avail - 1;                          /* capture length - 1    */
+    if (capm1 > (L7_SNAP_LEN - 2))                    /* JGT 254 -> [0, 254]   */
+        capm1 = (L7_SNAP_LEN - 2);
+    __u32 caplen = (__u32)capm1 + 1;                  /* [1, L7_SNAP_LEN-1]    */
 
     struct l7_event *e = bpf_ringbuf_reserve(&l7_events, sizeof(*e), 0);
     if (!e)
