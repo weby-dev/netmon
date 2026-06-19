@@ -1,6 +1,7 @@
-# Optional: run ClickHouse + the web stream in containers on the Proxmox host.
+# Optional: run ClickHouse (storage) in a container on the Proxmox host.
 # The collector itself must run on the host (XDP needs host kernel/NIC access),
-# NOT in a container.
+# NOT in a container. The real-time stream is served by the collector directly
+# on port 8090 (SSE /live) — there is no web container.
 #
 #   cd deploy && docker compose up -d
 #
@@ -11,8 +12,8 @@ services:
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     ports:
-      - "127.0.0.1:8123:8123"   # HTTP (collector + web talk to this)
-      - "127.0.0.1:9000:9000"   # native
+      - "127.0.0.1:8123:8123"   # HTTP (collector writes here; query history here)
+      - "127.0.0.1:9000:9000"   # native protocol
     volumes:
       - ch_data:/var/lib/clickhouse
       - ch_logs:/var/log/clickhouse-server
@@ -21,21 +22,6 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-
-  web:
-    build:
-      context: ..
-      dockerfile: deploy/web.Dockerfile
-    container_name: netmon-web
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-    environment:
-      CLICKHOUSE_URL: "http://clickhouse:8123"
-      CLICKHOUSE_DB: "netmon"
-    ports:
-      - "0.0.0.0:8088:8088"
-    restart: unless-stopped
 
 volumes:
   ch_data:

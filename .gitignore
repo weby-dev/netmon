@@ -6,12 +6,6 @@
 # Generated kernel BTF header (regenerate per-kernel with `make vmlinux`)
 ebpf/vmlinux.h
 
-# Python
-__pycache__/
-*.pyc
-web/venv/
-.venv/
-
 # Editor / OS
 .vscode/
 .idea/

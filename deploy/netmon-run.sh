@@ -25,7 +25,6 @@ else
   args+=(--stream-bind "${NETMON_STREAM_BIND:-0.0.0.0}")
   args+=(--stream-port "${NETMON_STREAM_PORT:-8090}")
   args+=(--live-interval "${NETMON_LIVE_INTERVAL:-1}")
-  [ -n "${NETMON_WEB_ROOT:-}" ] && args+=(--web-root "${NETMON_WEB_ROOT}")
 fi
 
 args+=(--ddos-pps "${NETMON_DDOS_PPS:-50000}")

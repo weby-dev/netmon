@@ -1,44 +1,35 @@
 # netmon — XDP/eBPF traffic monitor for Proxmox
 
-A flow-level network monitor built on **XDP/eBPF** (kernel data path) → **C++
-collector** (userspace control plane) → **ClickHouse** (storage) → **FastAPI
-web stream + dashboard** (visualisation).
+Flow-level network monitoring built on **XDP/eBPF** (kernel data path) and a
+**C++ collector** (userspace) that exposes the data two ways:
+
+1. **A real-time web stream** (Server-Sent Events) served directly by the
+   collector — consume it from your own project. No GUI, no dashboard.
+2. **ClickHouse** storage for history/analytics.
 
 ```
-        ┌─────────────┐   flow_map / ringbuf   ┌──────────────────┐
- NIC ───▶  XDP/eBPF   │ ─────────────────────▶ │  C++ collector    │
- tap ───▶  (kernel)   │  per-CPU stat maps     │  - delta + enrich │
- veth──▶  xdp_monitor │                        │  - app classify   │
-        └─────────────┘                        │  - L7 DPI parse   │
-                                               │  - security engine│
-                                               │  - aggregator     │
-                                               └───┬───────────┬───┘
-                          REAL-TIME (no DB)        │           │  batched JSONEachRow
-                    embedded SSE server  ┌─────────┘           ▼  (history)
-                       :8090/live        │            ┌──────────────────┐
-                                         │            │    ClickHouse     │
-                                         ▼            └────────┬─────────┘
-                                  ┌────────────┐               │ SQL
-                                  │  browsers  │◀──────────────┤
-                                  │ (dashboard)│  FastAPI :8088 │ (windowed/history)
-                                  └────────────┘◀──────────────┘
+        ┌─────────────┐  flow_map / ringbuf   ┌────────────────────┐
+ NIC ───▶  XDP/eBPF   │ ────────────────────▶ │   C++ collector     │
+ tap ───▶  (kernel)   │  per-CPU stat maps    │  - delta + enrich   │
+ veth──▶  xdp_monitor │                       │  - app classify     │
+        └─────────────┘                       │  - L7 DPI parse     │
+                                              │  - security engine   │
+                                              │  - aggregator        │
+                                              └─────┬───────────┬────┘
+                       REAL-TIME (no DB)            │           │  batched
+                  embedded SSE server  ◀────────────┘           ▼  JSONEachRow
+                  http://host:8090/live                 ┌────────────────┐
+                          │                             │   ClickHouse   │
+                          ▼                             │  (history/SQL) │
+                 ┌──────────────────┐                  └────────────────┘
+                 │   YOUR PROJECT   │
+                 │ (EventSource /   │
+                 │  curl / consumer)│
+                 └──────────────────┘
 ```
 
-Two data paths leave the collector:
-
-- **Real-time (ntop-style):** an **embedded SSE server inside the C++ collector**
-  (`StreamServer`, port `8090`, endpoint `/live`) pushes live events straight to
-  browsers **with no database in the path** — sub-second throughput/interface
-  KPIs, top talkers/flows every scrape, and **instant** L7 (DNS/HTTP/TLS) and
-  security alerts the moment they're parsed/detected.
-- **History:** the same data is batch-written to **ClickHouse**; the FastAPI
-  service (port `8088`) answers windowed/historical queries for the dashboard.
-
-The dashboard opens an `EventSource` to the collector's `/live` for everything
-real-time and falls back to the FastAPI REST API for historical tabs.
-
-> ⚠️ This is Linux/Proxmox code (XDP requires a recent Linux kernel). It is
-> **not** meant to build or run on macOS. Build and run it on the Proxmox host.
+> ⚠️ This is Linux/Proxmox code — XDP needs a recent Linux kernel. It is **not**
+> meant to build or run on macOS. Build and run it on the Proxmox host.
 
 ---
 
@@ -46,13 +37,13 @@ real-time and falls back to the FastAPI REST API for historical tabs.
 
 | Requirement | Where it's implemented |
 |---|---|
-| **Real-time streaming to users** (ntop-style, no DB in the path) | `collector/src/stream_server.cpp` embedded SSE on `:8090/live` |
-| **Traffic statistics** (src/dst IP, src/dst port, protocol, packet & byte counts, flow start/end) | `ebpf/xdp_monitor.bpf.c` (`flow_map`, `flow_stats`) → `flows` table |
-| **Bandwidth per host** | `Aggregator` → `host_bandwidth` table / `/api/top-talkers` |
-| **Bandwidth per application** | `app_classifier.cpp` + `Aggregator` → `app_bandwidth` |
-| **Top talkers** | `Aggregator::build` (sorted) → dashboard "Top Talkers" |
-| **Interface utilisation** | `if_stats_map` (kernel) + `Aggregator` deltas → `iface_util` |
-| **DDoS detection** | `SecurityEngine` (pps + SYN/s per destination) |
+| **Real-time web stream** (consume in your project, no DB in the path) | `collector/src/stream_server.cpp` — SSE on `:8090/live` |
+| **Traffic statistics** (src/dst IP, src/dst port, protocol, packet & byte counts, flow start/end) | `ebpf/xdp_monitor.bpf.c` (`flow_map`) → stream `flows` + `flows` table |
+| **Bandwidth per host** | `Aggregator` → stream `talkers` + `host_bandwidth` table |
+| **Bandwidth per application** | `app_classifier.cpp` + `Aggregator` → `app_bandwidth` table |
+| **Top talkers** | `Aggregator::build` → stream `talkers` |
+| **Interface utilisation** | `if_stats_map` + `Aggregator` → stream `ifaces` + `iface_util` table |
+| **DDoS detection** | `SecurityEngine` (pps + SYN/s per destination) → stream `security` |
 | **Port scanning detection** | `SecurityEngine` (distinct dst ports per source) |
 | **Host sweep / unusual patterns** | `SecurityEngine` (distinct hosts, exfil heuristics) |
 | **Suspicious connections** | `SecurityEngine` (known-bad ports, internal→external) |
@@ -73,55 +64,133 @@ Runs on every received packet **before** the kernel network stack:
 
 - Parses Ethernet (+ up to two VLAN tags) / IPv4 / IPv6 / TCP / UDP / ICMP.
 - Maintains a 5-tuple **flow table** (`BPF_MAP_TYPE_LRU_HASH`, 1M entries) with
-  packet/byte counters, first/last timestamps and accumulated TCP flags
-  (atomic `__sync_fetch_and_add`).
+  packet/byte counters, first/last timestamps and accumulated TCP flags.
 - Maintains **per-interface** counters (`if_stats_map`) and **global per-CPU**
-  counters (`global_stats`) for utilisation.
+  counters for utilisation.
 - For the first few packets of L7-interesting flows (HTTP/TLS/DNS/SMTP/DB
-  ports) it copies up to 256 payload bytes into a **ring buffer** (`l7_events`)
-  for userspace DPI — this is where TLS SNI / HTTP Host / DNS qname come from.
-- Optional **inline mitigation**: any source IPv4 present in `blocklist_map`
-  is `XDP_DROP`'d at line rate; everything else is `XDP_PASS` (pure monitor).
+  ports) it copies up to 256 payload bytes into a **ring buffer** for userspace
+  DPI — this is where TLS SNI / HTTP Host / DNS qname come from.
+- Optional **inline mitigation**: any source IPv4 present in `blocklist_map` is
+  `XDP_DROP`'d at line rate; everything else is `XDP_PASS`.
 
 ### 2. C++ collector (`collector/`)
 - Loads & attaches the program with **libbpf** (skeleton generated by
   `bpftool gen skeleton`).
-- A **ring-buffer thread** drains `l7_events` and parses them
-  (`l7_parser.cpp`).
-- The **main loop** every `--interval` seconds: scrapes `flow_map`, computes
-  per-flow **deltas**, classifies the application (`app_classifier.cpp`),
-  tags east-west vs north-south, runs the **aggregator** and **security
-  engine**, evicts idle flows, and **batch-inserts** to ClickHouse over HTTP.
+- A **ring-buffer thread** drains L7 samples and parses them (`l7_parser.cpp`),
+  pushing each to the stream **instantly** and queuing it for ClickHouse.
+- The **main loop** has two cadences:
+  - a fast **live tick** (`--live-interval`, default 1s) reads the cheap
+    interface/global counters and pushes throughput KPIs to the stream;
+  - a **full scrape** (`--interval`, default 2s) reads the flow map, computes
+    per-flow deltas, classifies the application, tags east-west vs north-south,
+    runs the aggregator + security engine, pushes top talkers/flows + alerts to
+    the stream, and **batch-inserts** to ClickHouse.
 
-### 3. ClickHouse (`clickhouse/schema.sql`)
+### 3. Real-time stream (`collector/src/stream_server.cpp`)
+An embedded, dependency-free **epoll/SSE server** inside the collector
+(default port `8090`):
+
+- `GET /live` → `text/event-stream` with the named events documented below.
+- `GET /healthz` → `{"ok":true,"clients":N}`.
+- One reactor thread owns all sockets + per-client buffers; collector threads
+  call `broadcast()` (queue + `eventfd` wakeup). Slow consumers that exceed an
+  8 MiB buffer are dropped, so a stuck client can't stall the collector.
+- `Access-Control-Allow-Origin: *` so a browser `EventSource` on another origin
+  can read it. **No GUI is served — this is a pure event stream.**
+
+### 4. ClickHouse storage (`clickhouse/schema.sql`)
 `MergeTree` tables partitioned by day with TTLs: `flows`, `l7_events`,
 `security_events`, `host_bandwidth`, `app_bandwidth`, `iface_util`, `summary`,
 plus a `host_bandwidth_1m` rollup materialized view. The collector applies the
-schema automatically at startup.
+schema automatically at startup, then batch-inserts via the HTTP interface.
 
-### 4a. Real-time stream — straight from the collector (`stream_server.cpp`)
-An embedded, dependency-free **epoll/SSE server** runs inside the collector on
-port `8090`. It bypasses the database entirely:
+---
 
-- `GET /live` → `text/event-stream` with named events:
-  `stats` (live bps/pps + flow/east-west counts, every `--live-interval`, default
-  1 s), `ifaces`, `talkers`, `flows` (each scrape), and **`l7` / `security`
-  pushed the instant** they're parsed/detected.
-- A single reactor thread owns all sockets + per-client buffers; collector
-  threads call `broadcast()` (queue + `eventfd` wakeup). Slow clients that
-  exceed an 8 MiB buffer are dropped, so a stuck browser can't stall the
-  collector. `Access-Control-Allow-Origin: *` lets the dashboard (served from
-  `:8088`) read the stream cross-origin.
-- Optional: set `--web-root web/frontend` to have the collector serve the
-  dashboard itself — then it's a fully self-contained daemon (ClickHouse +
-  FastAPI become optional, history-only extras).
+## The web stream — consuming it in your project
 
-### 4b. History / dashboard (`web/`)
-FastAPI service (port `8088`) exposing windowed REST endpoints backed by
-ClickHouse, serving the single-page dashboard (`web/frontend/index.html`,
-Chart.js) with Overview / Top Talkers / Applications / L7 / Security /
-Interfaces / Flows tabs. The dashboard consumes the **collector's** `/live`
-SSE for everything real-time and the FastAPI REST API for history.
+Connect to `http://<host>:8090/live`. It's standard SSE: each message has an
+`event:` name and a single-line JSON `data:` payload. Event types:
+
+| Event | Cadence | Payload |
+|---|---|---|
+| `stats` | every `--live-interval` (1s) | object — overall throughput KPIs |
+| `ifaces` | every live tick (1s) | array — per-interface utilisation |
+| `talkers` | every `--interval` (2s) | array — top talkers by bytes |
+| `flows` | every `--interval` (2s) | array — top active flows this interval |
+| `l7` | **instant** (as parsed) | object — one HTTP/TLS/DNS/SMTP/DB record |
+| `security` | **instant** (as detected) | object — one security alert |
+
+### Payload schemas
+
+`stats`
+```json
+{"ts":1718870400,"bps":48213000.0,"pps":5120.0,"interval_bytes":6026625,
+ "interval_packets":5120,"active_flows":318,"east_west_bytes":104857,
+ "north_south_bytes":5921768,"clients":2}
+```
+
+`ifaces` (array)
+```json
+[{"iface":"eno1","bps":40112000.0,"pps":4200.0,"d_bytes":5014000,
+  "d_packets":4200,"dropped":0}]
+```
+
+`talkers` (array)
+```json
+[{"ip":"10.0.0.21","total_bytes":94371840,"total_packets":68000}]
+```
+
+`flows` (array)
+```json
+[{"src_ip":"10.0.0.21","src_port":51514,"dst_ip":"1.1.1.1","dst_port":443,
+  "proto":"TCP","app":"https","direction":"north-south","d_bytes":1048576,
+  "d_packets":820,"bytes":20971520,"packets":16000}]
+```
+
+`l7` (object — only the fields relevant to `l7_proto` are populated)
+```json
+{"ts":1718870400,"src_ip":"10.0.0.21","dst_ip":"8.8.8.8","src_port":40012,
+ "dst_port":53,"proto":"UDP","l7_proto":"dns","http_method":"","http_host":"",
+ "http_path":"","http_status":"","tls_sni":"","dns_qname":"example.com",
+ "dns_qtype":"A","smtp_command":"","db_system":""}
+```
+
+`security` (object)
+```json
+{"ts":1718870400,"severity":"critical","category":"ddos","src_ip":"",
+ "dst_ip":"10.0.0.5","dst_port":0,"proto":"","detail":"SYN flood: 14200 SYN/s toward host",
+ "metric":14200,"threshold":10000}
+```
+
+### Example consumers
+
+**curl** (quick check):
+```bash
+curl -N http://<host>:8090/live
+```
+
+**Browser / Node (EventSource):**
+```js
+const es = new EventSource("http://<host>:8090/live");
+es.addEventListener("stats",    e => console.log("stats", JSON.parse(e.data)));
+es.addEventListener("flows",    e => render(JSON.parse(e.data)));
+es.addEventListener("l7",       e => onDpi(JSON.parse(e.data)));
+es.addEventListener("security", e => alertUser(JSON.parse(e.data)));
+```
+
+**Python** (no extra deps — parse the SSE framing yourself):
+```python
+import json, urllib.request
+with urllib.request.urlopen("http://<host>:8090/live") as r:
+    event = None
+    for raw in r:
+        line = raw.decode().rstrip("\n")
+        if line.startswith("event:"):
+            event = line[6:].strip()
+        elif line.startswith("data:"):
+            data = json.loads(line[5:].strip())
+            print(event, data)
+```
 
 ---
 
@@ -135,31 +204,27 @@ apt-get update
 apt-get install -y clang llvm libbpf-dev bpftool libelf-dev zlib1g-dev \
                    libcurl4-openssl-dev cmake build-essential pkg-config
 
-# 1) generate the BTF header for THIS kernel, build eBPF + skeleton + collector
+# generate the BTF header for THIS kernel, build eBPF + skeleton + collector
 make            # = make vmlinux (if missing) -> ebpf -> skeleton -> collector
 
 # binary lands at build/collector/netmon-collector
 ```
 
-If `/sys/kernel/btf/vmlinux` is absent (no `CONFIG_DEBUG_INFO_BTF`), install a
-matching `vmlinux.h` or `pve-headers` and run `make vmlinux`.
+If `/sys/kernel/btf/vmlinux` is absent (no `CONFIG_DEBUG_INFO_BTF`), install
+`pve-headers` / a matching `vmlinux.h` and run `make vmlinux`.
 
 ---
 
 ## Run
 
-### ClickHouse + web (containers, optional)
+### ClickHouse (storage)
+Containerised:
 ```bash
-cd deploy && docker compose up -d        # ClickHouse on :8123, web on :8088
+cd deploy && docker compose up -d        # ClickHouse on 127.0.0.1:8123
 ```
-Or install ClickHouse natively and run the web app:
-```bash
-cd web/backend && python3 -m venv venv && . venv/bin/activate
-pip install -r requirements.txt
-CLICKHOUSE_URL=http://127.0.0.1:8123 uvicorn app:app --host 0.0.0.0 --port 8088
-```
+…or install ClickHouse natively. The collector creates the schema on startup.
 
-### Collector (must run on the host as root)
+### Collector (on the host, as root)
 ```bash
 sudo NETMON_SCHEMA=clickhouse/schema.sql \
   build/collector/netmon-collector \
@@ -170,21 +235,24 @@ sudo NETMON_SCHEMA=clickhouse/schema.sql \
     --stream-port 8090 --verbose
 ```
 
-- Live stream (no DB): **http://<host>:8090/live** (raw SSE), consumed by the
-  dashboard automatically.
-- Dashboard: **http://<host>:8088** (FastAPI), or serve it from the collector
-  itself with `--web-root web/frontend` and open **http://<host>:8090**.
+- **Web stream:** `http://<host>:8090/live` — point your project at it.
+- **History:** query ClickHouse directly (`clickhouse-client`, or the HTTP
+  interface on `:8123`). See `clickhouse/schema.sql` for table layouts.
 
-**Pure real-time, no database:** run with `--no-stream` omitted and just skip
-ClickHouse — the live path needs no DB. (ClickHouse errors are logged and
-ignored; history tabs simply stay empty.)
+### Stream-only, no database
+The live path needs no DB. Run without ClickHouse (insert errors are logged and
+ignored; the stream is unaffected):
+```bash
+sudo build/collector/netmon-collector --iface vmbr0 --iface tap101i0 \
+     --stream-port 8090 --live-interval 1 --interval 2
+```
 
 ### As a service
 ```bash
 sudo make install                          # binary + schema + unit + env
 sudo install -m0755 deploy/netmon-run.sh        /usr/local/bin/netmon-run.sh
 sudo install -m0755 deploy/refresh-taps.sh      /usr/local/bin/netmon-refresh-taps.sh
-sudoedit /etc/netmon/collector.env         # set NETMON_IFACES
+sudoedit /etc/netmon/collector.env         # set NETMON_IFACES, stream port, etc.
 sudo systemctl enable --now netmon-collector
 ```
 
@@ -194,34 +262,37 @@ sudo systemctl enable --now netmon-collector
 
 XDP attached to the **physical NIC only sees north-south** traffic. VM-to-VM
 traffic on the same Linux bridge never reaches the NIC, so to see it you must
-attach the program to the **per-VM `tap` interfaces** (and per-CT `veth`).
-Each tap carries exactly one guest's traffic in both directions, so attaching
-to all taps gives full east-west visibility; the collector tags each flow
-`east-west` (both endpoints internal per `--internal_cidrs`) or `north-south`.
+attach to the **per-VM `tap` interfaces** (and per-CT `veth`). Each tap carries
+exactly one guest's traffic in both directions, so attaching to all taps gives
+full east-west visibility; the collector tags each flow `east-west` (both
+endpoints internal per `--internal_cidrs`) or `north-south`.
 
 Because VMs start/stop, `deploy/refresh-taps.sh` rediscovers `tap*/veth*`
 interfaces and restarts the collector. Wire it to a systemd timer or a Proxmox
-hookscript:
-```bash
-# /etc/systemd/system/netmon-refresh.timer  (OnUnitActiveSec=1min) ->
-#   ExecStart=/usr/local/bin/netmon-refresh-taps.sh
-```
+hookscript.
 
-Attach mode is `skb` (generic) by default because tap/veth/bridge devices do
-not support native XDP; use `--mode native` only on capable physical NICs.
+Attach mode is `skb` (generic) by default because tap/veth/bridge devices don't
+support native XDP; use `--mode native` only on capable physical NICs.
 
 ---
 
 ## Inline DDoS mitigation (optional)
 
 The security engine only *detects* by default. To also *block*, push offending
-source IPv4s into `blocklist_map` — the XDP program then drops them in-kernel.
-A `bpftool` one-liner (or extend the collector to do this automatically when a
-`ddos` event fires):
+source IPv4s into `blocklist_map` — the XDP program then drops them in-kernel:
 ```bash
 # block 203.0.113.7 (hex, network byte order key)
 bpftool map update name blocklist_map key hex 07 71 00 cb value hex 01
 ```
+
+---
+
+## Security note on the stream endpoint
+
+The SSE server binds `0.0.0.0:8090` with open CORS and **no authentication** —
+fine on a trusted management network. For exposed deployments, restrict
+`--stream-bind`, firewall the port, or front it with a reverse proxy
+(nginx/Caddy) that adds TLS + auth.
 
 ---
 
@@ -232,6 +303,7 @@ bpftool map update name blocklist_map key hex 07 71 00 cb value hex 01
   (`ebpf/xdp_monitor.bpf.c`).
 - **Detection thresholds** — `--ddos-pps/--ddos-syn/--scan-ports/--scan-hosts`
   or the `NETMON_*` env vars.
+- **Stream cadence** — `--live-interval` (KPIs) and `--interval` (flows/DB).
 - **Retention** — adjust the `TTL` clauses in `clickhouse/schema.sql`.
 - **Flow table size** — `MAX_FLOWS` in `ebpf/common.h` (LRU evicts oldest).
 
@@ -241,10 +313,18 @@ bpftool map update name blocklist_map key hex 07 71 00 cb value hex 01
 
 ```
 ebpf/        xdp_monitor.bpf.c, common.h (shared kernel/user types), vmlinux.h*
-collector/   C++ control plane (libbpf loader, classifier, DPI, security, CH)
-clickhouse/  schema.sql
-web/         backend/ (FastAPI)  +  frontend/ (dashboard)
-deploy/      systemd units, wrappers, docker-compose, tap refresher
+collector/   C++ control plane:
+             include/ , src/
+               bpf_loader        libbpf load/attach + map access
+               app_classifier    port -> application/category
+               l7_parser         HTTP / TLS-SNI / DNS / SMTP / DB DPI
+               security_engine    DDoS / scan / sweep / anomaly detection
+               aggregator         top talkers, per-host/app bw, iface util
+               stream_server      embedded SSE web stream (/live)
+               clickhouse_client  batched JSONEachRow inserts
+               json               shared single-line JSON builder
+clickhouse/  schema.sql           tables + rollup MV (auto-applied)
+deploy/      systemd unit, run wrapper, tap refresher, docker-compose (ClickHouse)
 config/      collector.env
 Makefile     eBPF + skeleton + collector orchestration
 ```

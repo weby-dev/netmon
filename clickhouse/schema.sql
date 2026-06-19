@@ -147,8 +147,8 @@ ORDER BY ts
 TTL ts + INTERVAL 90 DAY;
 
 -- =========================================================================
--- Convenience materialized view: per-minute top-talker rollup so the
--- dashboard can query long ranges cheaply.
+-- Convenience materialized view: per-minute top-talker rollup so consumers
+-- can query long time ranges cheaply.
 -- =========================================================================
 CREATE TABLE IF NOT EXISTS netmon.host_bandwidth_1m
 (

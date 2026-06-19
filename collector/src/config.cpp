@@ -40,7 +40,7 @@ Config Config::parse(int argc, char** argv) {
     enum {
         OPT_IDLE = 1000, OPT_DDOS_PPS, OPT_DDOS_SYN,
         OPT_SCAN_PORTS, OPT_SCAN_HOSTS, OPT_CH_USER, OPT_CH_PASS,
-        OPT_NO_STREAM, OPT_STREAM_BIND, OPT_WEB_ROOT, OPT_LIVE_INTERVAL
+        OPT_NO_STREAM, OPT_STREAM_BIND, OPT_LIVE_INTERVAL
     };
     static const struct option longopts[] = {
         {"iface",       required_argument, nullptr, 'i'},
@@ -54,7 +54,6 @@ Config Config::parse(int argc, char** argv) {
         {"stream-port", required_argument, nullptr, 's'},
         {"stream-bind", required_argument, nullptr, OPT_STREAM_BIND},
         {"no-stream",   no_argument,       nullptr, OPT_NO_STREAM},
-        {"web-root",    required_argument, nullptr, OPT_WEB_ROOT},
         {"live-interval", required_argument, nullptr, OPT_LIVE_INTERVAL},
         {"ddos-pps",    required_argument, nullptr, OPT_DDOS_PPS},
         {"ddos-syn",    required_argument, nullptr, OPT_DDOS_SYN},
@@ -79,7 +78,6 @@ Config Config::parse(int argc, char** argv) {
         case 's': c.stream_port = (uint16_t)std::atoi(optarg); break;
         case OPT_STREAM_BIND: c.stream_bind = optarg; break;
         case OPT_NO_STREAM: c.stream_enable = false; break;
-        case OPT_WEB_ROOT: c.stream_web_root = optarg; break;
         case OPT_LIVE_INTERVAL: c.live_interval = std::atoi(optarg); break;
         case OPT_DDOS_PPS: c.ddos_pps_threshold = std::strtoull(optarg, nullptr, 10); break;
         case OPT_DDOS_SYN: c.ddos_syn_threshold = std::strtoull(optarg, nullptr, 10); break;

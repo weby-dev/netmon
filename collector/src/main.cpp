@@ -145,8 +145,7 @@ int main(int argc, char** argv) {
     // ---- real-time stream server ---------------------------------------- //
     std::unique_ptr<StreamServer> stream;
     if (cfg.stream_enable) {
-        stream = std::make_unique<StreamServer>(cfg.stream_bind, cfg.stream_port,
-                                                cfg.stream_web_root);
+        stream = std::make_unique<StreamServer>(cfg.stream_bind, cfg.stream_port);
         if (!stream->start()) {
             std::fprintf(stderr, "warning: stream server failed to start\n");
             stream.reset();
