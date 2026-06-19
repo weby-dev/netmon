@@ -130,9 +130,15 @@ sample_l7(struct xdp_md *ctx, const struct flow_key *key, __u8 hint,
     if (payload_off >= total)
         return;                                 /* no payload */
 
-    __u32 avail = (__u32)(total - payload_off);
-    __u32 caplen = avail < (L7_SNAP_LEN - 1) ? avail : (L7_SNAP_LEN - 1);
-    caplen &= (L7_SNAP_LEN - 1);                /* bound for the verifier */
+    /* Clamp the read length into [1, L7_SNAP_LEN-1]. Use an explicit upper
+     * clamp (not a bitmask): a `&=` turns caplen into a known-bits value whose
+     * minimum the verifier can't raise above 0 via the `== 0` check, which is
+     * why bpf_xdp_load_bytes() then rejects it as a possibly-zero-sized read.
+     * A plain min-clamp keeps normal umin/umax tracking so `== 0` refines
+     * umin to 1. */
+    __u32 caplen = (__u32)(total - payload_off);
+    if (caplen > (L7_SNAP_LEN - 1))
+        caplen = (L7_SNAP_LEN - 1);
     if (caplen == 0)
         return;
 
