@@ -1,0 +1,26 @@
+[Unit]
+Description=netmon XDP traffic collector
+Documentation=https://github.com/your-org/netmon
+After=network-online.target clickhouse-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/netmon/collector.env
+# Build the --iface argument list from NETMON_IFACES via the wrapper script.
+ExecStart=/usr/local/bin/netmon-run.sh
+Restart=always
+RestartSec=3
+
+# XDP / BPF needs these capabilities (running as root is simplest on Proxmox).
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_RESOURCE
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_RESOURCE
+LimitMEMLOCK=infinity
+
+# Hardening (XDP still works with these).
+NoNewPrivileges=false
+ProtectHome=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
