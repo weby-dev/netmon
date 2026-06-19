@@ -130,17 +130,18 @@ sample_l7(struct xdp_md *ctx, const struct flow_key *key, __u8 hint,
     if (payload_off >= total)
         return;                                 /* no payload */
 
-    /* Clamp the read length into [1, L7_SNAP_LEN-1]. Use an explicit upper
-     * clamp (not a bitmask): a `&=` turns caplen into a known-bits value whose
-     * minimum the verifier can't raise above 0 via the `== 0` check, which is
-     * why bpf_xdp_load_bytes() then rejects it as a possibly-zero-sized read.
-     * A plain min-clamp keeps normal umin/umax tracking so `== 0` refines
-     * umin to 1. */
-    __u32 caplen = (__u32)(total - payload_off);
-    if (caplen > (L7_SNAP_LEN - 1))
-        caplen = (L7_SNAP_LEN - 1);
-    if (caplen == 0)
+    /* Length of the captured payload, clamped to [1, L7_SNAP_LEN-1]. Do the
+     * clamp and the zero-check in u64 space and only THEN narrow to u32. That
+     * yields a size the verifier sees as both non-negative (smin >= 0) and
+     * non-zero (umin >= 1) — bpf_xdp_load_bytes() rejects a size that might be
+     * either. (A u32 min-clamp tripped "min value is negative"; a bitmask
+     * tripped "invalid zero-sized read".) */
+    __u64 avail = total - (__u64)payload_off;
+    if (avail > (L7_SNAP_LEN - 1))
+        avail = (L7_SNAP_LEN - 1);
+    if (avail == 0)
         return;
+    __u32 caplen = (__u32)avail;
 
     struct l7_event *e = bpf_ringbuf_reserve(&l7_events, sizeof(*e), 0);
     if (!e)
