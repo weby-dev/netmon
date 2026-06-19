@@ -222,10 +222,14 @@ If `/sys/kernel/btf/vmlinux` is absent (no `CONFIG_DEBUG_INFO_BTF`), install
 > NICs), and ClickHouse is installed natively alongside it.
 
 ### ClickHouse (storage, native)
-Proxmox VE 8 is Debian 12, so use the official ClickHouse APT repo:
+Uses ClickHouse's own APT repo, so it works on any Proxmox/Debian release
+(bookworm, trixie, …) regardless of the host's other repos:
 ```bash
 sudo bash deploy/install-clickhouse.sh        # adds repo, installs, starts, caps RAM
 ```
+The script refreshes **only** the ClickHouse source list, so a broken or
+unauthenticated host repo (e.g. the Proxmox *enterprise* repo returning `401`
+without a subscription) won't block it.
 This listens on `127.0.0.1:8123` (HTTP) and `:9000` (native), with the default
 user and no password — matching the collector defaults. The collector creates
 the `netmon` database + tables on startup.
