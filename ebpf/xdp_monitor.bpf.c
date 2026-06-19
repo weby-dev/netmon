@@ -202,7 +202,8 @@ int xdp_monitor(struct xdp_md *ctx)
     key.ifindex = (__u16)ifindex;
 
     __u8 protocol = 0;
-    __u32 l4_off  = 0;          /* offset of L4 header from packet start */
+    __u32 l4_off  = 0;          /* offset of L4 header from packet start    */
+    void *l4      = NULL;       /* L4 header kept as a tracked packet ptr   */
 
     if (h_proto == bpf_htons(ETH_P_IP)) {
         struct iphdr *ip = cursor;
@@ -211,7 +212,12 @@ int xdp_monitor(struct xdp_md *ctx)
         if (ip->ihl < 5)
             return XDP_PASS;
         __u32 ihl = (__u32)ip->ihl * 4;
-        if ((void *)((__u8 *)ip + ihl) > data_end)
+        /* Keep the L4 header as a packet pointer derived straight from the
+         * validated `ip` pointer. Do NOT reconstruct it later as
+         * `data + scalar_offset`: pointer subtraction yields an unbounded
+         * scalar, which the verifier then refuses to read through. */
+        l4 = (__u8 *)ip + ihl;
+        if (l4 > data_end)
             return XDP_PASS;
 
         key.family = AF_INET;
@@ -225,6 +231,7 @@ int xdp_monitor(struct xdp_md *ctx)
         if ((void *)(ip6 + 1) > data_end)
             return XDP_PASS;
 
+        l4 = (void *)(ip6 + 1);
         key.family = AF_INET6;
         __builtin_memcpy(key.src_addr, &ip6->saddr, 16);
         __builtin_memcpy(key.dst_addr, &ip6->daddr, 16);
@@ -241,7 +248,6 @@ int xdp_monitor(struct xdp_md *ctx)
     __u32 tcp_flags = 0;
     __u32 l4_hdr_len = 0;
     int   is_syn = 0, is_rst = 0;
-    void *l4 = (__u8 *)data + l4_off;
 
     if (protocol == IPPROTO_TCP) {
         struct tcphdr *tcp = l4;
