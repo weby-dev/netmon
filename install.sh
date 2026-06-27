@@ -270,6 +270,10 @@ XML
     </users>
 </clickhouse>
 XML
+  # ClickHouse runs as the 'clickhouse' user — it must be able to read these,
+  # or startup fails with "Access to file denied" (CANNOT_LOAD_CONFIG).
+  chown clickhouse:clickhouse /etc/clickhouse-server/config.d/netmon.xml \
+                              /etc/clickhouse-server/users.d/netmon.xml 2>/dev/null || true
   chmod 640 /etc/clickhouse-server/users.d/netmon.xml
 
   systemctl enable clickhouse-server >/dev/null 2>&1 || true
