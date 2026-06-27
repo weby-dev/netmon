@@ -11,6 +11,7 @@
 #   sudo ./install.sh --no-start          # install + enable but don't start
 #   sudo ./install.sh --with-taps-timer   # also install the tap-refresh timer
 #   sudo ./install.sh --skip-repo-fix     # don't touch Proxmox APT repos
+#   sudo ./install.sh --fix-release       # finish a half-done Debian release upgrade
 #
 # On Proxmox VE the subscription-only "enterprise" APT repos return HTTP 401,
 # which makes `apt update` fail and leaves even Debian packages (git, sudo, the
@@ -18,8 +19,14 @@
 # and enables the free "pve-no-subscription" repo so apt works cleanly. Use
 # --skip-repo-fix if you have a valid subscription and manage repos yourself.
 #
-# Idempotent: safe to re-run for upgrades. An existing
-# /etc/netmon/collector.env is preserved (never overwritten).
+# If the host has a half-finished Debian upgrade (e.g. both bookworm and trixie
+# repos enabled), dependency installs break on a libc6/libc6-dev mismatch. The
+# script detects this and stops with guidance; pass --fix-release to consolidate
+# the APT suites to the newest release and run 'apt full-upgrade' automatically.
+#
+# Idempotent: safe to re-run for upgrades. A previously installed collector
+# (service + binary) is stopped and removed first, and an existing
+# /etc/netmon/collector.env is always preserved (never overwritten).
 set -euo pipefail
 
 # --- locations -------------------------------------------------------------- #
@@ -39,6 +46,7 @@ SKIP_BUILD=0
 NO_START=0
 WITH_TAPS_TIMER=0
 SKIP_REPO_FIX=0
+FIX_RELEASE=0
 
 # --- helpers ---------------------------------------------------------------- #
 log()  { printf '\033[1;32m>>\033[0m %s\n' "$*"; }
@@ -124,6 +132,80 @@ fix_apt_repos() {
   fi
 }
 
+# --- Debian release consistency --------------------------------------------- #
+# A half-finished release upgrade leaves >1 Debian codename enabled across the
+# APT sources (e.g. bookworm + trixie). The installed libc6 then mismatches the
+# only available libc6-dev and every -dev build package becomes uninstallable.
+
+# Print the distinct Debian codenames currently enabled (one per line).
+enabled_codenames() {
+  { grep -rhsE '^[[:space:]]*Suites:' /etc/apt/sources.list.d/*.sources 2>/dev/null \
+      | sed 's/^[[:space:]]*Suites:[[:space:]]*//' || true
+    grep -rhsE '^[[:space:]]*deb ' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null \
+      | awk '{print $3}' || true; } \
+    | grep -oE '(bullseye|bookworm|trixie|forky)' | sort -u || true
+}
+
+# Newest enabled codename — the consolidation target.
+newest_codename() {
+  local c r best="" rank=0
+  for c in $(enabled_codenames); do
+    case "$c" in bullseye) r=1;; bookworm) r=2;; trixie) r=3;; forky) r=4;; *) r=0;; esac
+    if [ "$r" -gt "$rank" ]; then rank="$r"; best="$c"; fi
+  done
+  printf '%s' "$best"
+}
+
+is_mixed_release() { [ "$(enabled_codenames | wc -l | tr -d ' ')" -gt 1 ]; }
+
+# Rewrite the suite/codename in one APT source file (deb822 Suites: lines, or
+# the suite field of legacy `deb` lines only — never URLs or Signed-By paths).
+rewrite_suite() {  # <file> <old> <target>
+  local f="$1" old="$2" target="$3"
+  cp -n "$f" "$f.netmon-bak" 2>/dev/null || true
+  case "$f" in
+    *.sources) sed -i -E "/^[[:space:]]*Suites:/ s/\\b$old\\b/$target/g" "$f" ;;
+    *)         sed -i -E "/^[[:space:]]*deb/     s/\\b$old\\b/$target/g" "$f" ;;
+  esac
+}
+
+# Consolidate every APT suite to the newest release and complete the upgrade.
+fix_mixed_release() {
+  local target old f
+  target="$(newest_codename)"
+  [ -n "$target" ] || die "could not determine the Debian codename to upgrade to"
+  warn "consolidating APT sources to '$target' and running 'apt full-upgrade'"
+  for old in bullseye bookworm trixie forky; do
+    [ "$old" = "$target" ] && continue
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
+             /etc/apt/sources.list.d/*.list; do
+      [ -f "$f" ] || continue
+      case "$f" in *.bak|*.disabled|*.netmon-bak) continue;; esac
+      grep -qsE "\\b$old\\b" "$f" || continue
+      rewrite_suite "$f" "$old" "$target"
+      log "  $f: $old -> $target"
+    done
+  done
+  log "updating package lists"
+  apt-get update || warn "apt-get update reported errors"
+  log "running 'apt full-upgrade' to $target (this can take a while; a reboot may be needed)"
+  DEBIAN_FRONTEND=noninteractive apt-get -y full-upgrade
+}
+
+# Stop and remove a previously installed collector so we reinstall cleanly.
+# Operator config (collector.env) and schema are preserved.
+remove_existing() {
+  if [ -f "$UNIT_DST" ] || [ -x "$BIN_DST" ] \
+     || systemctl is-enabled --quiet netmon-collector 2>/dev/null; then
+    log "existing netmon install detected — removing before reinstall (config kept)"
+    systemctl stop netmon-collector 2>/dev/null || true
+    systemctl disable netmon-collector 2>/dev/null || true
+    rm -f "$BIN_DST" "$WRAP_DST" "$UNIT_DST"
+    systemctl daemon-reload 2>/dev/null || true
+    log "  stopped service; removed old binary, wrapper, and unit"
+  fi
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --with-clickhouse) WITH_CLICKHOUSE=1 ;;
@@ -132,6 +214,7 @@ while [ $# -gt 0 ]; do
     --no-start)        NO_START=1 ;;
     --with-taps-timer) WITH_TAPS_TIMER=1 ;;
     --skip-repo-fix)   SKIP_REPO_FIX=1 ;;
+    --fix-release)     FIX_RELEASE=1 ;;
     -h|--help)         usage ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
@@ -156,6 +239,22 @@ HAVE_APT=0; command -v apt-get >/dev/null 2>&1 && HAVE_APT=1
 if [ "$SKIP_DEPS" = "0" ]; then
   if [ "$HAVE_APT" = "1" ]; then
     if [ "$SKIP_REPO_FIX" = "0" ]; then fix_apt_repos; fi
+
+    if is_mixed_release; then
+      if [ "$FIX_RELEASE" = "1" ]; then
+        fix_mixed_release
+      else
+        die "Mixed Debian release in APT sources: $(enabled_codenames | tr '\n' ' ').
+  This is a half-finished Debian upgrade (e.g. bookworm + trixie) and will break
+  dependency installation (libc6 vs libc6-dev mismatch).
+  Re-run with --fix-release to consolidate to the newest release and complete the
+  upgrade (back up/snapshot first; a reboot may be needed), or fix it manually:
+    grep -rl bookworm /etc/apt/sources.list /etc/apt/sources.list.d/ | xargs -r sed -i.bak 's/bookworm/trixie/g'
+    apt update && apt full-upgrade -y
+  On a production Proxmox host, prefer the official 'pve8to9' procedure."
+      fi
+    fi
+
     log "updating package lists"
     apt-get update || warn "apt-get update reported errors (continuing)"
     log "installing base tools + build dependencies via apt"
@@ -184,6 +283,9 @@ else
   log "skipping build (--skip-build)"
 fi
 [ -x "$BIN_SRC" ] || die "collector binary not found at $BIN_SRC (build failed or --skip-build with no prior build)"
+
+# --- 3b. remove any previous install (clean reinstall; keeps collector.env) -- #
+remove_existing
 
 # --- 4. install artifacts --------------------------------------------------- #
 log "installing binary, wrapper, schema, and unit"
