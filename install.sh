@@ -237,6 +237,8 @@ install_clickhouse() {
   cat > /etc/clickhouse-server/config.d/netmon.xml <<'XML'
 <clickhouse>
     <listen_host>0.0.0.0</listen_host>
+    <!-- tolerate an un-bindable address (e.g. IPv6 ::1 when IPv6 is disabled) -->
+    <listen_try>1</listen_try>
     <max_server_memory_usage>2000000000</max_server_memory_usage>
     <mark_cache_size>268435456</mark_cache_size>
     <uncompressed_cache_size>0</uncompressed_cache_size>
@@ -271,14 +273,19 @@ XML
   chmod 640 /etc/clickhouse-server/users.d/netmon.xml
 
   systemctl enable clickhouse-server >/dev/null 2>&1 || true
-  systemctl restart clickhouse-server
+  systemctl restart clickhouse-server || true   # don't die here; diagnose below
   log "waiting for ClickHouse to come up"
   local i ok=0
   for i in $(seq 1 60); do
     if clickhouse-client --user "$CH_GUI_USER" --password "$CH_GUI_PASS" --query "SELECT 1" >/dev/null 2>&1; then ok=1; break; fi
     sleep 1
   done
-  [ "$ok" = "1" ] || die "ClickHouse did not become ready — check: journalctl -u clickhouse-server -n 50"
+  if [ "$ok" != "1" ]; then
+    warn "ClickHouse did not become ready — last errors:"
+    tail -n 25 /var/log/clickhouse-server/clickhouse-server.err.log 2>/dev/null \
+      || journalctl -u clickhouse-server -n 25 --no-pager 2>/dev/null || true
+    die "ClickHouse failed to start (see errors above); fix the cause and re-run: bash $INSTALL_DIR/install.sh --skip-os-setup"
+  fi
 }
 
 apply_schema_and_retention() {
