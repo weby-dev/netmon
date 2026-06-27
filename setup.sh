@@ -7,6 +7,10 @@
 #   bash setup.sh                 # full bootstrap + install
 #   bash setup.sh --clone-only    # just fix APT + install git + clone, then stop
 #
+# Register this install with vormox.com (sends ClickHouse connection details):
+#   bash setup.sh --domain acme.com
+#   bash setup.sh --domain acme.com --webhook-secret <shared-secret>
+#
 # Any extra flags are passed straight through to install.sh, e.g.:
 #   bash setup.sh --no-clickhouse --retention-days 14
 #
@@ -26,11 +30,14 @@ usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "${BASH_SOURC
 # Collect our own flags; forward everything else to install.sh.
 while [ $# -gt 0 ]; do
   case "$1" in
-    --clone-only) CLONE_ONLY=1 ;;
-    --dir)        INSTALL_DIR="$2"; PASSTHRU+=(--dir "$2"); shift ;;
-    --repo)       REPO_URL="$2"; shift ;;
-    -h|--help)    usage ;;
-    *)            PASSTHRU+=("$1") ;;
+    --clone-only)     CLONE_ONLY=1 ;;
+    --dir)            INSTALL_DIR="$2"; PASSTHRU+=(--dir "$2"); shift ;;
+    --repo)           REPO_URL="$2"; shift ;;
+    --domain)         PASSTHRU+=(--domain "$2"); shift ;;
+    --webhook-url)    PASSTHRU+=(--webhook-url "$2"); shift ;;
+    --webhook-secret) PASSTHRU+=(--webhook-secret "$2"); shift ;;
+    -h|--help)        usage ;;
+    *)                PASSTHRU+=("$1") ;;
   esac
   shift
 done

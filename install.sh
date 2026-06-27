@@ -28,10 +28,17 @@
 #   --dir PATH            install dir (default: /opt/netmon)
 #   --repo URL            git URL (default: https://github.com/weby-dev/netmon.git)
 #   --retention-days N    DB retention in days (default: 7)
+#   --domain DOMAIN       this deployment's domain; saved and sent to the webhook
+#   --webhook-url URL     registration webhook (default: https://vormox.com/api/webhook)
+#   --webhook-secret S    HMAC-SHA256 the webhook body with this shared secret
 #   --no-clickhouse       skip the ClickHouse install/config
 #   --skip-os-setup       skip APT repo fix + dependency install
 #   --no-start            install but don't start the collector
 #   -h, --help            this help
+#
+# When --domain is given, after install the script POSTs the ClickHouse
+# connection details (host, ports, db, user, password) + domain to the webhook
+# so the upstream service (vormox.com) can connect. See docs/vormox-webhook.md.
 #
 # Run as root.
 set -euo pipefail
@@ -40,6 +47,9 @@ set -euo pipefail
 REPO_URL="${NETMON_REPO_URL:-https://github.com/weby-dev/netmon.git}"
 INSTALL_DIR="${NETMON_DIR:-/opt/netmon}"
 RETENTION_DAYS="${NETMON_RETENTION_DAYS:-7}"
+DOMAIN="${NETMON_DOMAIN:-}"
+WEBHOOK_URL="${NETMON_WEBHOOK_URL:-https://vormox.com/api/webhook}"
+WEBHOOK_SECRET="${NETMON_WEBHOOK_SECRET:-}"
 WITH_CLICKHOUSE=1
 SKIP_OS_SETUP=0
 NO_START=0
@@ -81,6 +91,9 @@ while [ $# -gt 0 ]; do
     --dir)            INSTALL_DIR="$2"; shift ;;
     --repo)           REPO_URL="$2"; shift ;;
     --retention-days) RETENTION_DAYS="$2"; shift ;;
+    --domain)         DOMAIN="$2"; shift ;;
+    --webhook-url)    WEBHOOK_URL="$2"; shift ;;
+    --webhook-secret) WEBHOOK_SECRET="$2"; shift ;;
     --no-clickhouse)  WITH_CLICKHOUSE=0 ;;
     --skip-os-setup)  SKIP_OS_SETUP=1 ;;
     --no-start)       NO_START=1 ;;
@@ -398,6 +411,7 @@ if [ "$WITH_CLICKHOUSE" = "1" ]; then
   set_env NETMON_CLICKHOUSE_PASS "$CH_DB_PASS"
 fi
 set_env NETMON_SCHEMA "$SCHEMA_DST"
+if [ -n "$DOMAIN" ]; then set_env NETMON_DOMAIN "$DOMAIN"; fi
 chmod 600 "$ENV_DST"
 
 #############################################################################
@@ -473,6 +487,41 @@ EOF
   chmod 600 "$CRED_FILE"
   log "credentials written to $CRED_FILE"
 fi
+
+#############################################################################
+# 8. Register with the webhook (vormox.com) — only when --domain is given
+#############################################################################
+# Posts the ClickHouse connection details + domain so the upstream service can
+# connect. Body is JSON; if --webhook-secret is set, an HMAC-SHA256 of the exact
+# body is sent in X-Netmon-Signature for verification. See docs/vormox-webhook.md.
+send_webhook() {
+  [ -n "$DOMAIN" ] || { log "no --domain given; skipping webhook registration"; return 0; }
+  if [ "$WITH_CLICKHOUSE" != "1" ]; then
+    warn "webhook skipped: --domain set but ClickHouse was not installed (--no-clickhouse)"; return 0
+  fi
+  local ts payload sig
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # Compact single-line JSON (kept byte-exact for signing).
+  payload="{\"event\":\"netmon.installed\",\"domain\":\"${DOMAIN}\",\"installed_at\":\"${ts}\",\"clickhouse\":{\"host\":\"${PRIMARY_IP}\",\"native_port\":9000,\"http_port\":8123,\"http_remote\":false,\"database\":\"${CH_DB}\",\"user\":\"${CH_DB_USER}\",\"password\":\"${CH_DB_PASS}\"}}"
+
+  local hdr=(-H "Content-Type: application/json" -H "X-Netmon-Domain: ${DOMAIN}")
+  if [ -n "$WEBHOOK_SECRET" ] && command -v python3 >/dev/null 2>&1; then
+    sig="$(printf '%s' "$payload" | S="$WEBHOOK_SECRET" python3 -c \
+      'import sys,os,hmac,hashlib; print(hmac.new(os.environ["S"].encode(), sys.stdin.buffer.read(), hashlib.sha256).hexdigest())')"
+    hdr+=(-H "X-Netmon-Signature: sha256=${sig}")
+  elif [ -n "$WEBHOOK_SECRET" ]; then
+    warn "  python3 missing — sending webhook UNSIGNED"
+  fi
+
+  log "registering with ${WEBHOOK_URL} (domain: ${DOMAIN})"
+  if curl -fsS --max-time 20 -X POST "${WEBHOOK_URL}" "${hdr[@]}" --data-binary "$payload" >/dev/null; then
+    log "  webhook delivered"
+  else
+    warn "  webhook POST failed (check connectivity to ${WEBHOOK_URL})."
+    warn "  re-run later to regenerate creds + resend: bash $INSTALL_DIR/install.sh --skip-os-setup --domain $DOMAIN"
+  fi
+}
+send_webhook
 
 #############################################################################
 # Done
