@@ -60,7 +60,7 @@ warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
 usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "${BASH_SOURCE[0]}"; exit 0; }
 
-gen_pass() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c 28; }
+gen_pass() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 28 || true; }
 sha256_hex() { printf '%s' "$1" | sha256sum | awk '{print $1}'; }
 
 # Distinct Debian codenames currently enabled across the APT sources.
@@ -339,7 +339,7 @@ set_env() {  # key value
 
 # Sensible interface default if the seeded one wasn't edited.
 DETECTED_IFACES="$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | sed 's/@.*//' \
-  | grep -E '^(vmbr[0-9]+|eno[0-9]+|enp[0-9a-z]+|ens[0-9a-z]+|eth[0-9]+)$' | sort -u | tr '\n' ' ' | sed 's/ *$//')"
+  | grep -E '^(vmbr[0-9]+|eno[0-9]+|enp[0-9a-z]+|ens[0-9a-z]+|eth[0-9]+)$' | sort -u | tr '\n' ' ' | sed 's/ *$//' || true)"
 [ -n "$DETECTED_IFACES" ] && set_env NETMON_IFACES "$DETECTED_IFACES"
 
 if [ "$WITH_CLICKHOUSE" = "1" ]; then
