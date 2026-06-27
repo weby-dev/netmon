@@ -294,6 +294,7 @@ XML
 
 apply_schema_and_retention() {
   log "applying schema with ${RETENTION_DAYS}-day retention"
+  mkdir -p "$(dirname "$SCHEMA_DST")"   # /etc/netmon may not exist yet
   # Rewrite every TTL in the schema to the requested retention, install it.
   sed -E "s/INTERVAL[[:space:]]+[0-9]+[[:space:]]+DAY/INTERVAL ${RETENTION_DAYS} DAY/g" \
     "$INSTALL_DIR/clickhouse/schema.sql" > "$SCHEMA_DST"
