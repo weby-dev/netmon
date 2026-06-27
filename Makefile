@@ -62,10 +62,16 @@ collector: $(SKEL)
 
 install: collector
 	install -D -m 0755 $(BUILD_DIR)/collector/netmon-collector /usr/local/bin/netmon-collector
+	install -D -m 0755 deploy/netmon-run.sh /usr/local/bin/netmon-run.sh
 	install -D -m 0644 clickhouse/schema.sql /etc/netmon/schema.sql
 	install -D -m 0644 deploy/netmon-collector.service /etc/systemd/system/netmon-collector.service
-	install -D -m 0644 config/collector.env /etc/netmon/collector.env
+	@if [ -f /etc/netmon/collector.env ]; then \
+		echo ">> keeping existing /etc/netmon/collector.env"; \
+	else \
+		install -D -m 0644 config/collector.env /etc/netmon/collector.env; \
+	fi
 	@echo ">> installed. Edit /etc/netmon/collector.env then: systemctl enable --now netmon-collector"
+	@echo ">> (or run ./install.sh for a full deps + build + ClickHouse install)"
 
 clean:
 	rm -rf $(BUILD_DIR) $(SKEL)
