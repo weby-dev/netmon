@@ -18,8 +18,10 @@
 #   2. Installs build + tooling dependencies.
 #   3. Places the project in a dedicated dir (/opt/netmon) and removes .git.
 #   4. Builds and installs the collector (binary, wrapper, hardened systemd unit).
-#   5. Installs ClickHouse, makes it remotely accessible, creates a DB user and
-#      a GUI/admin user with generated passwords, and sets 7-day retention.
+#   5. Installs ClickHouse (CLI-only): native port 9000 open for remote
+#      clickhouse-client, HTTP :8123 (and its /play web console) blocked from the
+#      network. Creates a collector DB user + an admin user with generated
+#      passwords, and sets 7-day retention.
 #   6. Writes all credentials to <dir>/clickhouse.md (chmod 600).
 #
 # Options:
@@ -44,8 +46,7 @@ NO_START=0
 
 CH_DB="netmon"
 CH_DB_USER="netmon"     # used by the collector
-CH_GUI_USER="admin"     # used for the web GUI / SQL admin
-GUI_PORT="${NETMON_GUI_PORT:-8124}"   # Adminer web GUI port
+CH_ADMIN_USER="admin"   # full-access admin user (clickhouse-client / SQL)
 
 # install destinations
 BIN_DST="/usr/local/bin/netmon-collector"
@@ -214,9 +215,9 @@ cd "$INSTALL_DIR"
 #############################################################################
 # 3. ClickHouse: install, secure, make remote, create users
 #############################################################################
-CH_DB_PASS=""; CH_GUI_PASS=""
+CH_DB_PASS=""; CH_ADMIN_PASS=""
 install_clickhouse() {
-  CH_DB_PASS="$(gen_pass)"; CH_GUI_PASS="$(gen_pass)"
+  CH_DB_PASS="$(gen_pass)"; CH_ADMIN_PASS="$(gen_pass)"
 
   if ! command -v clickhouse-server >/dev/null 2>&1; then
     log "installing ClickHouse (official APT repo)"
@@ -247,7 +248,7 @@ install_clickhouse() {
 XML
 
   # Users: lock the password-less 'default' user to localhost; create a
-  # collector user and an admin/GUI user reachable remotely (with passwords).
+  # collector user and an admin user reachable remotely (with passwords).
   install -d /etc/clickhouse-server/users.d
   cat > /etc/clickhouse-server/users.d/netmon.xml <<XML
 <clickhouse>
@@ -261,13 +262,13 @@ XML
             <profile>default</profile>
             <quota>default</quota>
         </${CH_DB_USER}>
-        <${CH_GUI_USER}>
-            <password_sha256_hex>$(sha256_hex "$CH_GUI_PASS")</password_sha256_hex>
+        <${CH_ADMIN_USER}>
+            <password_sha256_hex>$(sha256_hex "$CH_ADMIN_PASS")</password_sha256_hex>
             <networks><ip>::/0</ip></networks>
             <profile>default</profile>
             <quota>default</quota>
             <access_management>1</access_management>
-        </${CH_GUI_USER}>
+        </${CH_ADMIN_USER}>
     </users>
 </clickhouse>
 XML
@@ -282,7 +283,7 @@ XML
   log "waiting for ClickHouse to come up"
   local i ok=0
   for i in $(seq 1 60); do
-    if clickhouse-client --user "$CH_GUI_USER" --password "$CH_GUI_PASS" --query "SELECT 1" >/dev/null 2>&1; then ok=1; break; fi
+    if clickhouse-client --user "$CH_ADMIN_USER" --password "$CH_ADMIN_PASS" --query "SELECT 1" >/dev/null 2>&1; then ok=1; break; fi
     sleep 1
   done
   if [ "$ok" != "1" ]; then
@@ -299,59 +300,55 @@ apply_schema_and_retention() {
   # Rewrite every TTL in the schema to the requested retention, install it.
   sed -E "s/INTERVAL[[:space:]]+[0-9]+[[:space:]]+DAY/INTERVAL ${RETENTION_DAYS} DAY/g" \
     "$INSTALL_DIR/clickhouse/schema.sql" > "$SCHEMA_DST"
-  clickhouse-client --user "$CH_GUI_USER" --password "$CH_GUI_PASS" --multiquery < "$SCHEMA_DST" \
+  clickhouse-client --user "$CH_ADMIN_USER" --password "$CH_ADMIN_PASS" --multiquery < "$SCHEMA_DST" \
     || warn "schema apply reported errors (collector will retry at startup)"
 
   # Force retention on any pre-existing tables too (CREATE IF NOT EXISTS won't).
   local t
   for t in flows l7_events security_events host_bandwidth app_bandwidth iface_util summary; do
-    clickhouse-client --user "$CH_GUI_USER" --password "$CH_GUI_PASS" \
+    clickhouse-client --user "$CH_ADMIN_USER" --password "$CH_ADMIN_PASS" \
       --query "ALTER TABLE ${CH_DB}.${t} MODIFY TTL ts + INTERVAL ${RETENTION_DAYS} DAY" 2>/dev/null || true
   done
-  clickhouse-client --user "$CH_GUI_USER" --password "$CH_GUI_PASS" \
+  clickhouse-client --user "$CH_ADMIN_USER" --password "$CH_ADMIN_PASS" \
     --query "ALTER TABLE ${CH_DB}.host_bandwidth_1m MODIFY TTL minute + INTERVAL ${RETENTION_DAYS} DAY" 2>/dev/null || true
 }
 
-# phpMyAdmin-style web GUI (Adminer): left-hand database/table tree, click a
-# table to browse rows, run SQL. Single PHP file served by PHP's built-in
-# server — no Docker, no nginx. Adminer has native ClickHouse support.
-install_gui() {
-  log "installing Adminer web GUI (phpMyAdmin-style) on port $GUI_PORT"
-  DEBIAN_FRONTEND=noninteractive apt-get install -y php-cli php-curl 2>/dev/null \
-    || warn "  apt could not install php-cli/php-curl"
-  if ! command -v php >/dev/null 2>&1; then
-    warn "  php unavailable — skipping Adminer (the /play SQL console still works)"
-    return 0
-  fi
-  install -d "$INSTALL_DIR/adminer"
-  if ! curl -fsSL https://www.adminer.org/latest.php -o "$INSTALL_DIR/adminer/index.php"; then
-    warn "  could not download Adminer — skipping GUI"
-    return 0
-  fi
-  cat > /etc/systemd/system/netmon-adminer.service <<EOF
+# CLI-only: block the ClickHouse HTTP port (:8123, which also serves the built-in
+# /play web console) from the network. The collector reaches it over loopback
+# (allowed); remote access is the native CLI on :9000. A tiny boot-time oneshot
+# re-applies the single iptables rule so it survives reboots. SSH (22) and the
+# native port (9000) are untouched.
+restrict_http_remote() {
+  log "blocking ClickHouse HTTP/:8123 (and /play) from the network — CLI-only"
+  cat > /usr/local/bin/netmon-chfw.sh <<'SH'
+#!/usr/bin/env bash
+# Drop remote access to ClickHouse HTTP (8123); loopback (the collector) is allowed.
+set -e
+rule=(INPUT -p tcp --dport 8123 ! -i lo -j DROP)
+iptables -C "${rule[@]}" 2>/dev/null || iptables -I "${rule[@]}"
+SH
+  chmod +x /usr/local/bin/netmon-chfw.sh
+  cat > /etc/systemd/system/netmon-chfw.service <<'EOF'
 [Unit]
-Description=Adminer DB GUI (netmon / ClickHouse)
+Description=Block ClickHouse HTTP :8123 from the network (netmon CLI-only)
 After=network-online.target clickhouse-server.service
 Wants=network-online.target
 
 [Service]
-Type=simple
-ExecStart=$(command -v php) -d session.save_path=/tmp -S 0.0.0.0:${GUI_PORT} -t ${INSTALL_DIR}/adminer
-Restart=always
-RestartSec=3
-DynamicUser=yes
-NoNewPrivileges=true
+Type=oneshot
+ExecStart=/usr/local/bin/netmon-chfw.sh
+RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable netmon-adminer >/dev/null 2>&1 || true
-  systemctl restart netmon-adminer 2>/dev/null || warn "  Adminer service failed to start"
-  log "  Adminer GUI -> http://<host>:${GUI_PORT}"
+  systemctl enable netmon-chfw.service >/dev/null 2>&1 || true
+  systemctl start netmon-chfw.service 2>/dev/null \
+    || warn "  could not apply iptables rule (check 'iptables' is available)"
 }
 
-if [ "$WITH_CLICKHOUSE" = "1" ]; then install_clickhouse; install_gui; fi
+if [ "$WITH_CLICKHOUSE" = "1" ]; then install_clickhouse; restrict_http_remote; fi
 
 #############################################################################
 # 4. Build + install the collector
@@ -433,18 +430,23 @@ if [ "$WITH_CLICKHOUSE" = "1" ]; then
 
 > Generated by install.sh on $(date -u '+%Y-%m-%d %H:%M:%S UTC'). Keep this file private.
 
-## Web GUI (Adminer — phpMyAdmin-style: database/table tree, browse data)
-- URL      : http://${PRIMARY_IP}:${GUI_PORT}
-- System   : ClickHouse
-- Server   : http://localhost:8123    (include the port)
-- Username : ${CH_GUI_USER}
-- Password : ${CH_GUI_PASS}
+## CLI access
+\`\`\`bash
+# on the server
+clickhouse-client --user ${CH_ADMIN_USER} --password '${CH_ADMIN_PASS}' --database ${CH_DB}
 
-## Endpoints (remotely accessible — bound to 0.0.0.0)
-- HTTP / API     : http://${PRIMARY_IP}:8123
-- Native         : ${PRIMARY_IP}:9000
-- Built-in SQL   : http://${PRIMARY_IP}:8123/play  (bare SQL console)
-- Built-in charts: http://${PRIMARY_IP}:8123/dashboard
+# from a remote machine (native protocol on port 9000)
+clickhouse-client --host ${PRIMARY_IP} --port 9000 \\
+  --user ${CH_ADMIN_USER} --password '${CH_ADMIN_PASS}' --database ${CH_DB}
+
+# then, e.g.:  SHOW TABLES;   SELECT * FROM security_events ORDER BY ts DESC LIMIT 20;
+\`\`\`
+
+## Ports
+- Native TCP : ${PRIMARY_IP}:9000  — remote clickhouse-client (CLI). OPEN to the network.
+- HTTP       : 127.0.0.1:8123      — used by the collector only. BLOCKED from the
+  network by the netmon-chfw service, so the built-in /play web console is not
+  reachable remotely (CLI-only setup).
 
 ## Database
 - Name       : ${CH_DB}
@@ -454,29 +456,19 @@ if [ "$WITH_CLICKHOUSE" = "1" ]; then
 | Purpose                | Username        | Password           |
 |------------------------|-----------------|--------------------|
 | Collector (DB read/write) | ${CH_DB_USER}   | ${CH_DB_PASS}      |
-| GUI / admin (full)        | ${CH_GUI_USER}  | ${CH_GUI_PASS}     |
+| Admin (full)              | ${CH_ADMIN_USER}  | ${CH_ADMIN_PASS}     |
 
-The default password-less \`default\` user is restricted to localhost only.
-
-## Quick checks
-\`\`\`bash
-# from the server
-clickhouse-client --user ${CH_GUI_USER} --password '${CH_GUI_PASS}' \\
-  --query "SELECT count() FROM ${CH_DB}.flows"
-
-# from a remote host over HTTP
-curl "http://${PRIMARY_IP}:8123/?user=${CH_GUI_USER}&password=${CH_GUI_PASS}" \\
-  --data-binary "SELECT category, count() FROM ${CH_DB}.security_events GROUP BY category"
-\`\`\`
+The password-less \`default\` user is restricted to localhost only.
 
 ## ⚠️ Security
-ClickHouse is exposed on 0.0.0.0:8123/9000. Restrict access to trusted IPs with
-the Proxmox/host firewall, e.g.:
+The native port (9000) is open to the network with password auth. Restrict it to
+trusted IPs with the host firewall, e.g.:
 \`\`\`bash
-# allow only your office/VPN subnet to reach ClickHouse
-iptables -A INPUT -p tcp -m multiport --dports 8123,9000,${GUI_PORT} -s <your.cidr/24> -j ACCEPT
-iptables -A INPUT -p tcp -m multiport --dports 8123,9000,${GUI_PORT} -j DROP
+iptables -A INPUT -p tcp --dport 9000 -s <your.cidr/24> -j ACCEPT
+iptables -A INPUT -p tcp --dport 9000 -j DROP
 \`\`\`
+To re-expose HTTP/:8123 (and /play) later: \`systemctl disable --now netmon-chfw\`
+then flush the rule: \`iptables -D INPUT -p tcp --dport 8123 ! -i lo -j DROP\`.
 EOF
   chmod 600 "$CRED_FILE"
   log "credentials written to $CRED_FILE"
@@ -495,9 +487,8 @@ $(log "install complete")
 EOF
 if [ "$WITH_CLICKHOUSE" = "1" ]; then
 cat <<EOF
-  DB GUI      : http://${PRIMARY_IP}:${GUI_PORT}   (Adminer; creds in $CRED_FILE)
-  ClickHouse  : http://${PRIMARY_IP}:8123/play   (bare SQL console)
-  retention   : ${RETENTION_DAYS} days
+  ClickHouse  : clickhouse-client --user ${CH_ADMIN_USER} --password ... --database ${CH_DB}
+  retention   : ${RETENTION_DAYS} days (creds in $CRED_FILE)
 EOF
 fi
 cat <<EOF
