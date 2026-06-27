@@ -42,8 +42,11 @@ const char* severity_name(Severity s);
 struct SecurityEvent {
     uint64_t    ts_unix = 0;
     Severity    severity = Severity::Info;
-    std::string category;     // "ddos" | "port_scan" | "host_sweep" |
-                              // "anomaly" | "suspicious_conn"
+    std::string category;     // "ddos" | "ddos_outbound" | "icmp_flood" |
+                              // "port_scan" | "host_sweep" | "stealth_scan" |
+                              // "bruteforce" | "lateral_movement" | "dns_abuse" |
+                              // "amplification" | "cryptomining" |
+                              // "suspicious_conn" | "anomaly"
     std::string src_ip;
     std::string dst_ip;
     uint16_t    dst_port = 0;

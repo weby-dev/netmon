@@ -50,11 +50,17 @@ struct Config {
     size_t batch_max_rows = 5000;
 
     // Security thresholds (see SecurityEngine).
-    uint64_t ddos_pps_threshold   = 50000;   // packets/sec to one dst
-    uint64_t ddos_syn_threshold   = 10000;   // SYN/sec to one dst
-    uint32_t scan_port_threshold  = 50;      // distinct dst ports / src / window
-    uint32_t scan_host_threshold  = 50;      // distinct dst hosts / src / window
-    int      security_window      = 10;      // seconds
+    uint64_t ddos_pps_threshold     = 50000; // inbound packets/sec to one dst
+    uint64_t ddos_syn_threshold     = 10000; // inbound SYN/sec to one dst
+    uint64_t ddos_out_pps_threshold = 20000; // OUTBOUND pps from one internal src (VM)
+    uint64_t ddos_out_syn_threshold = 5000;  // OUTBOUND SYN/sec from one internal src
+    uint64_t icmp_flood_threshold   = 5000;  // ICMP packets/sec to one dst
+    uint32_t scan_port_threshold    = 50;    // distinct dst ports / src / window
+    uint32_t scan_host_threshold    = 50;    // distinct dst hosts / src / window
+    uint32_t bruteforce_threshold   = 40;    // conn attempts / (src->dst:svc) / window
+    uint32_t dns_rate_threshold     = 300;   // DNS queries / src / window (tunnel/DGA)
+    uint32_t lateral_host_threshold = 10;    // internal hosts on admin ports / src / win
+    int      security_window        = 10;    // seconds
 
     // Network ranges considered "internal" for east-west classification
     // (CIDR strings). Defaults cover RFC1918.

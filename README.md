@@ -43,10 +43,18 @@ Flow-level network monitoring built on **XDP/eBPF** (kernel data path) and a
 | **Bandwidth per application** | `app_classifier.cpp` + `Aggregator` → `app_bandwidth` table |
 | **Top talkers** | `Aggregator::build` → stream `talkers` |
 | **Interface utilisation** | `if_stats_map` + `Aggregator` → stream `ifaces` + `iface_util` table |
-| **DDoS detection** | `SecurityEngine` (pps + SYN/s per destination) → stream `security` |
+| **DDoS detection (inbound)** | `SecurityEngine` (pps + SYN/s per destination) → stream `security` |
+| **DDoS detection (outbound, per VM)** | `SecurityEngine` (pps + SYN/s per internal source → names the offending VM) |
+| **ICMP flood** | `SecurityEngine` (ICMP pps per destination) |
 | **Port scanning detection** | `SecurityEngine` (distinct dst ports per source) |
-| **Host sweep / unusual patterns** | `SecurityEngine` (distinct hosts, exfil heuristics) |
-| **Suspicious connections** | `SecurityEngine` (known-bad ports, internal→external) |
+| **Stealth scans (NULL/FIN/XMAS)** | `SecurityEngine` (TCP flag-pattern heuristics) |
+| **Host sweep** | `SecurityEngine` (distinct hosts per source) |
+| **Brute force / credential stuffing** | `SecurityEngine` (conn attempts per src→service port) |
+| **Lateral movement** | `SecurityEngine` (internal fan-out on admin ports RDP/SMB/SSH/WinRM) |
+| **DNS abuse / tunnelling** | `SecurityEngine` (DNS query-rate spike per source) |
+| **Reflection / amplification** | `SecurityEngine` (large inbound from amplifier ports) |
+| **Cryptomining** | `SecurityEngine` (outbound to known mining-pool ports) |
+| **Suspicious connections / exfil** | `SecurityEngine` (known-bad ports, large internal→external) |
 | **East-west visibility** | attach XDP to VM `tap`/CT `veth` interfaces; `direction` field |
 | **HTTP/HTTPS** | kernel payload sampling + `l7_parser` (method, host, path, **TLS SNI**) |
 | **DNS** | `l7_parser` (qname, qtype) |
@@ -317,8 +325,9 @@ fine on a trusted management network. For exposed deployments, restrict
 - **More applications / custom flows** — add ports to the tables in
   `collector/src/app_classifier.cpp` and DPI hints in `l7_hint_for()`
   (`ebpf/xdp_monitor.bpf.c`).
-- **Detection thresholds** — `--ddos-pps/--ddos-syn/--scan-ports/--scan-hosts`
-  or the `NETMON_*` env vars.
+- **Detection thresholds** — `--ddos-pps/--ddos-syn/--ddos-out-pps/--ddos-out-syn/
+  --icmp-flood/--scan-ports/--scan-hosts/--bruteforce/--dns-rate/--lateral-hosts`
+  or the matching `NETMON_*` env vars in `collector.env`.
 - **Stream cadence** — `--live-interval` (KPIs) and `--interval` (flows/DB).
 - **Retention** — adjust the `TTL` clauses in `clickhouse/schema.sql`.
 - **Flow table size** — `MAX_FLOWS` in `ebpf/common.h` (LRU evicts oldest).

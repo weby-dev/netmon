@@ -3,6 +3,9 @@ Description=netmon XDP traffic collector
 Documentation=https://github.com/your-org/netmon
 After=network-online.target clickhouse-server.service
 Wants=network-online.target
+# Keep restarting indefinitely: a monitoring sensor going dark is the failure
+# we are trying to avoid, so never let the unit latch into the "failed" state.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -11,6 +14,13 @@ EnvironmentFile=/etc/netmon/collector.env
 ExecStart=/usr/local/bin/netmon-run.sh
 Restart=always
 RestartSec=3
+
+# Resilience: bound memory so a flood cannot OOM the host, and make the kernel
+# OOM-killer prefer almost anything else over the sensor. The collector also
+# runs an internal watchdog that aborts (-> restart) if its scrape loop wedges.
+MemoryHigh=1G
+MemoryMax=2G
+OOMScoreAdjust=-600
 
 # XDP / BPF needs these capabilities (running as root is simplest on Proxmox).
 AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_RESOURCE

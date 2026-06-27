@@ -25,10 +25,16 @@ void Config::print_usage(const char* prog) {
 "      --stream-bind <addr>   Stream bind address (default: 0.0.0.0)\n"
 "      --no-stream            Disable the real-time stream server\n"
 "      --live-interval <sec>  Live KPI push cadence (default: 1)\n"
-"      --ddos-pps <n>         DDoS packets/sec threshold (default: 50000)\n"
-"      --ddos-syn <n>         DDoS SYN/sec threshold (default: 10000)\n"
+"      --ddos-pps <n>         Inbound DDoS packets/sec threshold (default: 50000)\n"
+"      --ddos-syn <n>         Inbound DDoS SYN/sec threshold (default: 10000)\n"
+"      --ddos-out-pps <n>     Outbound DDoS pps from one VM (default: 20000)\n"
+"      --ddos-out-syn <n>     Outbound DDoS SYN/sec from one VM (default: 5000)\n"
+"      --icmp-flood <n>       ICMP flood pps threshold (default: 5000)\n"
 "      --scan-ports <n>       Port-scan distinct-port threshold (default: 50)\n"
 "      --scan-hosts <n>       Sweep distinct-host threshold (default: 50)\n"
+"      --bruteforce <n>       Brute-force attempts/window threshold (default: 40)\n"
+"      --dns-rate <n>         DNS queries/window threshold (default: 300)\n"
+"      --lateral-hosts <n>    Lateral-movement host threshold (default: 10)\n"
 "  -v, --verbose              Verbose logging\n"
 "  -h, --help                 This help\n",
         prog);
@@ -40,7 +46,9 @@ Config Config::parse(int argc, char** argv) {
     enum {
         OPT_IDLE = 1000, OPT_DDOS_PPS, OPT_DDOS_SYN,
         OPT_SCAN_PORTS, OPT_SCAN_HOSTS, OPT_CH_USER, OPT_CH_PASS,
-        OPT_NO_STREAM, OPT_STREAM_BIND, OPT_LIVE_INTERVAL
+        OPT_NO_STREAM, OPT_STREAM_BIND, OPT_LIVE_INTERVAL,
+        OPT_DDOS_OUT_PPS, OPT_DDOS_OUT_SYN, OPT_ICMP_FLOOD,
+        OPT_BRUTEFORCE, OPT_DNS_RATE, OPT_LATERAL_HOSTS
     };
     static const struct option longopts[] = {
         {"iface",       required_argument, nullptr, 'i'},
@@ -57,8 +65,14 @@ Config Config::parse(int argc, char** argv) {
         {"live-interval", required_argument, nullptr, OPT_LIVE_INTERVAL},
         {"ddos-pps",    required_argument, nullptr, OPT_DDOS_PPS},
         {"ddos-syn",    required_argument, nullptr, OPT_DDOS_SYN},
+        {"ddos-out-pps",required_argument, nullptr, OPT_DDOS_OUT_PPS},
+        {"ddos-out-syn",required_argument, nullptr, OPT_DDOS_OUT_SYN},
+        {"icmp-flood",  required_argument, nullptr, OPT_ICMP_FLOOD},
         {"scan-ports",  required_argument, nullptr, OPT_SCAN_PORTS},
         {"scan-hosts",  required_argument, nullptr, OPT_SCAN_HOSTS},
+        {"bruteforce",  required_argument, nullptr, OPT_BRUTEFORCE},
+        {"dns-rate",    required_argument, nullptr, OPT_DNS_RATE},
+        {"lateral-hosts", required_argument, nullptr, OPT_LATERAL_HOSTS},
         {"verbose",     no_argument,       nullptr, 'v'},
         {"help",        no_argument,       nullptr, 'h'},
         {nullptr, 0, nullptr, 0}
@@ -81,8 +95,14 @@ Config Config::parse(int argc, char** argv) {
         case OPT_LIVE_INTERVAL: c.live_interval = std::atoi(optarg); break;
         case OPT_DDOS_PPS: c.ddos_pps_threshold = std::strtoull(optarg, nullptr, 10); break;
         case OPT_DDOS_SYN: c.ddos_syn_threshold = std::strtoull(optarg, nullptr, 10); break;
+        case OPT_DDOS_OUT_PPS: c.ddos_out_pps_threshold = std::strtoull(optarg, nullptr, 10); break;
+        case OPT_DDOS_OUT_SYN: c.ddos_out_syn_threshold = std::strtoull(optarg, nullptr, 10); break;
+        case OPT_ICMP_FLOOD: c.icmp_flood_threshold = std::strtoull(optarg, nullptr, 10); break;
         case OPT_SCAN_PORTS: c.scan_port_threshold = std::strtoul(optarg, nullptr, 10); break;
         case OPT_SCAN_HOSTS: c.scan_host_threshold = std::strtoul(optarg, nullptr, 10); break;
+        case OPT_BRUTEFORCE: c.bruteforce_threshold = std::strtoul(optarg, nullptr, 10); break;
+        case OPT_DNS_RATE: c.dns_rate_threshold = std::strtoul(optarg, nullptr, 10); break;
+        case OPT_LATERAL_HOSTS: c.lateral_host_threshold = std::strtoul(optarg, nullptr, 10); break;
         case 'v': c.verbose = true; break;
         case 'h': print_usage(argv[0]); std::exit(0);
         default:  print_usage(argv[0]); std::exit(2);

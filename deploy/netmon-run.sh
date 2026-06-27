@@ -29,8 +29,14 @@ fi
 
 args+=(--ddos-pps "${NETMON_DDOS_PPS:-50000}")
 args+=(--ddos-syn "${NETMON_DDOS_SYN:-10000}")
+args+=(--ddos-out-pps "${NETMON_DDOS_OUT_PPS:-20000}")
+args+=(--ddos-out-syn "${NETMON_DDOS_OUT_SYN:-5000}")
+args+=(--icmp-flood "${NETMON_ICMP_FLOOD:-5000}")
 args+=(--scan-ports "${NETMON_SCAN_PORTS:-50}")
 args+=(--scan-hosts "${NETMON_SCAN_HOSTS:-50}")
+args+=(--bruteforce "${NETMON_BRUTEFORCE:-40}")
+args+=(--dns-rate "${NETMON_DNS_RATE:-300}")
+args+=(--lateral-hosts "${NETMON_LATERAL_HOSTS:-10}")
 
 export NETMON_SCHEMA="${NETMON_SCHEMA:-/etc/netmon/schema.sql}"
 exec /usr/local/bin/netmon-collector "${args[@]}"

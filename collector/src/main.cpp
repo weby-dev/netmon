@@ -46,6 +46,12 @@ using namespace netmon;
 static std::atomic<bool> g_running{true};
 static void on_signal(int) { g_running = false; }
 
+// Liveness heartbeat: the main scrape loop stamps this every tick. A watchdog
+// thread aborts the process if the loop wedges (e.g. a stuck flow scrape or a
+// blocked ClickHouse write) so systemd's Restart=always can recover it — a
+// crashed collector restarts, but a *hung* one would silently go blind.
+static std::atomic<uint64_t> g_heartbeat{0};
+
 // ----- monotonic(ktime) -> unix wall-clock conversion -------------------- //
 static int64_t g_clock_offset_ns = 0;   // unix_ns = ktime_ns + offset
 static void refresh_clock_offset() {
@@ -171,6 +177,26 @@ int main(int argc, char** argv) {
         }
     });
 
+    // ---- liveness watchdog: restart-on-hang ----------------------------- //
+    const uint64_t watchdog_timeout =
+        std::max<uint64_t>(60, (uint64_t)cfg.flow_poll_interval * 10);
+    g_heartbeat.store(now_unix());
+    std::thread watchdog([&]() {
+        while (g_running.load()) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (!g_running.load()) break;   // don't fire during clean shutdown
+            uint64_t hb = g_heartbeat.load();
+            if (hb && now_unix() - hb > watchdog_timeout) {
+                std::fprintf(stderr,
+                    "fatal: main loop stalled for >%llus (last tick %llus ago); "
+                    "aborting for supervisor restart\n",
+                    (unsigned long long)watchdog_timeout,
+                    (unsigned long long)(now_unix() - hb));
+                std::abort();
+            }
+        }
+    });
+
     std::unordered_map<flow_key, PrevState, FlowKeyHash, FlowKeyEq> prev;
 
     // Live-tick interface state (independent of the slower aggregator prev).
@@ -193,6 +219,7 @@ int main(int argc, char** argv) {
 
         refresh_clock_offset();
         uint64_t ts = now_unix();
+        g_heartbeat.store(ts);   // liveness for the watchdog thread
 
         // ============ FAST LIVE TICK: interfaces + throughput ============ //
         double tnow = steady_now();
@@ -374,6 +401,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "\nshutting down...\n");
     if (stream) stream->stop();
     l7_thread.join();
+    watchdog.join();
     ch.flush();
     bpf.detach();
     return 0;
