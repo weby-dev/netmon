@@ -31,6 +31,9 @@
 #   --domain DOMAIN       this deployment's domain; saved and sent to the webhook
 #   --webhook-url URL     registration webhook (default: https://vormox.com/api/webhook)
 #   --webhook-secret S    HMAC-SHA256 the webhook body with this shared secret
+#   --event-webhook-url U where to POST important events (default: https://<domain>/api/webhook)
+#   --event-token S       shared token sent as X-Netmon-Token (generated if unset)
+#   --event-min-severity  info|low|medium|high|critical (default: high)
 #   --no-clickhouse       skip the ClickHouse install/config
 #   --skip-os-setup       skip APT repo fix + dependency install
 #   --no-start            install but don't start the collector
@@ -50,6 +53,11 @@ RETENTION_DAYS="${NETMON_RETENTION_DAYS:-7}"
 DOMAIN="${NETMON_DOMAIN:-}"
 WEBHOOK_URL="${NETMON_WEBHOOK_URL:-https://vormox.com/api/webhook}"
 WEBHOOK_SECRET="${NETMON_WEBHOOK_SECRET:-}"
+# Real-time event webhook to the CLIENT's own endpoint (important events only).
+# URL defaults to https://<domain>/api/webhook; token is generated if unset.
+EVENT_WEBHOOK_URL="${NETMON_EVENT_WEBHOOK_URL:-}"
+EVENT_WEBHOOK_TOKEN="${NETMON_EVENT_WEBHOOK_TOKEN:-}"
+EVENT_MIN_SEVERITY="${NETMON_EVENT_WEBHOOK_MIN_SEVERITY:-high}"
 WITH_CLICKHOUSE=1
 SKIP_OS_SETUP=0
 NO_START=0
@@ -91,9 +99,12 @@ while [ $# -gt 0 ]; do
     --dir)            INSTALL_DIR="$2"; shift ;;
     --repo)           REPO_URL="$2"; shift ;;
     --retention-days) RETENTION_DAYS="$2"; shift ;;
-    --domain)         DOMAIN="$2"; shift ;;
-    --webhook-url)    WEBHOOK_URL="$2"; shift ;;
-    --webhook-secret) WEBHOOK_SECRET="$2"; shift ;;
+    --domain)            DOMAIN="$2"; shift ;;
+    --webhook-url)       WEBHOOK_URL="$2"; shift ;;
+    --webhook-secret)    WEBHOOK_SECRET="$2"; shift ;;
+    --event-webhook-url) EVENT_WEBHOOK_URL="$2"; shift ;;
+    --event-token)       EVENT_WEBHOOK_TOKEN="$2"; shift ;;
+    --event-min-severity) EVENT_MIN_SEVERITY="$2"; shift ;;
     --no-clickhouse)  WITH_CLICKHOUSE=0 ;;
     --skip-os-setup)  SKIP_OS_SETUP=1 ;;
     --no-start)       NO_START=1 ;;
@@ -110,6 +121,14 @@ command -v apt-get >/dev/null 2>&1 || die "this installer targets Debian/Proxmox
 
 TARGET_CODENAME="$(. /etc/os-release 2>/dev/null && printf '%s' "${VERSION_CODENAME:-}")" || true
 [ -n "$TARGET_CODENAME" ] || die "cannot read VERSION_CODENAME from /etc/os-release"
+
+# Event webhook (client endpoint): derive from --domain, auto-generate a token.
+if [ -n "$DOMAIN" ] && [ -z "$EVENT_WEBHOOK_URL" ]; then
+  EVENT_WEBHOOK_URL="https://${DOMAIN}/api/webhook"
+fi
+if [ -n "$EVENT_WEBHOOK_URL" ] && [ -z "$EVENT_WEBHOOK_TOKEN" ]; then
+  EVENT_WEBHOOK_TOKEN="$(gen_pass)"
+fi
 
 #############################################################################
 # 1. OS / APT setup
@@ -412,6 +431,11 @@ if [ "$WITH_CLICKHOUSE" = "1" ]; then
 fi
 set_env NETMON_SCHEMA "$SCHEMA_DST"
 if [ -n "$DOMAIN" ]; then set_env NETMON_DOMAIN "$DOMAIN"; fi
+if [ -n "$EVENT_WEBHOOK_URL" ]; then
+  set_env NETMON_EVENT_WEBHOOK_URL          "$EVENT_WEBHOOK_URL"
+  set_env NETMON_EVENT_WEBHOOK_TOKEN        "$EVENT_WEBHOOK_TOKEN"
+  set_env NETMON_EVENT_WEBHOOK_MIN_SEVERITY "$EVENT_MIN_SEVERITY"
+fi
 chmod 600 "$ENV_DST"
 
 #############################################################################
@@ -484,6 +508,17 @@ iptables -A INPUT -p tcp --dport 9000 -j DROP
 To re-expose HTTP/:8123 (and /play) later: \`systemctl disable --now netmon-chfw\`
 then flush the rule: \`iptables -D INPUT -p tcp --dport 8123 ! -i lo -j DROP\`.
 EOF
+  if [ -n "$EVENT_WEBHOOK_URL" ]; then
+    cat >> "$CRED_FILE" <<EOF
+
+## Real-time event webhook (important events → your endpoint)
+- Endpoint     : ${EVENT_WEBHOOK_URL}
+- Auth header  : X-Netmon-Token: ${EVENT_WEBHOOK_TOKEN}
+- Min severity : ${EVENT_MIN_SEVERITY}  (attacks / scans / floods; lower severities are stored in ClickHouse only)
+- The collector POSTs one JSON event per important alert. Your endpoint must
+  accept POST application/json and return 2xx. See docs/event-webhook.md.
+EOF
+  fi
   chmod 600 "$CRED_FILE"
   log "credentials written to $CRED_FILE"
 fi
@@ -502,7 +537,7 @@ send_webhook() {
   local ts payload sig
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   # Compact single-line JSON (kept byte-exact for signing).
-  payload="{\"event\":\"netmon.installed\",\"domain\":\"${DOMAIN}\",\"installed_at\":\"${ts}\",\"clickhouse\":{\"host\":\"${PRIMARY_IP}\",\"native_port\":9000,\"http_port\":8123,\"http_remote\":false,\"database\":\"${CH_DB}\",\"user\":\"${CH_DB_USER}\",\"password\":\"${CH_DB_PASS}\"}}"
+  payload="{\"event\":\"netmon.installed\",\"domain\":\"${DOMAIN}\",\"installed_at\":\"${ts}\",\"clickhouse\":{\"host\":\"${PRIMARY_IP}\",\"native_port\":9000,\"http_port\":8123,\"http_remote\":false,\"database\":\"${CH_DB}\",\"user\":\"${CH_DB_USER}\",\"password\":\"${CH_DB_PASS}\"},\"event_webhook\":{\"url\":\"${EVENT_WEBHOOK_URL}\",\"token\":\"${EVENT_WEBHOOK_TOKEN}\",\"min_severity\":\"${EVENT_MIN_SEVERITY}\"}}"
 
   local hdr=(-H "Content-Type: application/json" -H "X-Netmon-Domain: ${DOMAIN}")
   if [ -n "$WEBHOOK_SECRET" ] && command -v python3 >/dev/null 2>&1; then

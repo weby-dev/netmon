@@ -35,6 +35,10 @@ void Config::print_usage(const char* prog) {
 "      --bruteforce <n>       Brute-force attempts/window threshold (default: 40)\n"
 "      --dns-rate <n>         DNS queries/window threshold (default: 300)\n"
 "      --lateral-hosts <n>    Lateral-movement host threshold (default: 10)\n"
+"      --event-webhook-url <url>        POST important events to this endpoint\n"
+"                                       (e.g. https://acme.com/api/webhook)\n"
+"      --event-webhook-token <secret>   Sent as X-Netmon-Token header\n"
+"      --event-webhook-min-severity <s> info|low|medium|high|critical (default: high)\n"
 "  -v, --verbose              Verbose logging\n"
 "  -h, --help                 This help\n",
         prog);
@@ -48,7 +52,8 @@ Config Config::parse(int argc, char** argv) {
         OPT_SCAN_PORTS, OPT_SCAN_HOSTS, OPT_CH_USER, OPT_CH_PASS,
         OPT_NO_STREAM, OPT_STREAM_BIND, OPT_LIVE_INTERVAL,
         OPT_DDOS_OUT_PPS, OPT_DDOS_OUT_SYN, OPT_ICMP_FLOOD,
-        OPT_BRUTEFORCE, OPT_DNS_RATE, OPT_LATERAL_HOSTS
+        OPT_BRUTEFORCE, OPT_DNS_RATE, OPT_LATERAL_HOSTS,
+        OPT_EVENT_WH_URL, OPT_EVENT_WH_TOKEN, OPT_EVENT_WH_SEV
     };
     static const struct option longopts[] = {
         {"iface",       required_argument, nullptr, 'i'},
@@ -73,6 +78,9 @@ Config Config::parse(int argc, char** argv) {
         {"bruteforce",  required_argument, nullptr, OPT_BRUTEFORCE},
         {"dns-rate",    required_argument, nullptr, OPT_DNS_RATE},
         {"lateral-hosts", required_argument, nullptr, OPT_LATERAL_HOSTS},
+        {"event-webhook-url",          required_argument, nullptr, OPT_EVENT_WH_URL},
+        {"event-webhook-token",        required_argument, nullptr, OPT_EVENT_WH_TOKEN},
+        {"event-webhook-min-severity", required_argument, nullptr, OPT_EVENT_WH_SEV},
         {"verbose",     no_argument,       nullptr, 'v'},
         {"help",        no_argument,       nullptr, 'h'},
         {nullptr, 0, nullptr, 0}
@@ -103,6 +111,18 @@ Config Config::parse(int argc, char** argv) {
         case OPT_BRUTEFORCE: c.bruteforce_threshold = std::strtoul(optarg, nullptr, 10); break;
         case OPT_DNS_RATE: c.dns_rate_threshold = std::strtoul(optarg, nullptr, 10); break;
         case OPT_LATERAL_HOSTS: c.lateral_host_threshold = std::strtoul(optarg, nullptr, 10); break;
+        case OPT_EVENT_WH_URL:   c.event_webhook_url = optarg; break;
+        case OPT_EVENT_WH_TOKEN: c.event_webhook_token = optarg; break;
+        case OPT_EVENT_WH_SEV: {
+            std::string v = optarg;
+            if      (v == "info")     c.event_webhook_min_severity = 0;
+            else if (v == "low")      c.event_webhook_min_severity = 1;
+            else if (v == "medium")   c.event_webhook_min_severity = 2;
+            else if (v == "high")     c.event_webhook_min_severity = 3;
+            else if (v == "critical") c.event_webhook_min_severity = 4;
+            else                      c.event_webhook_min_severity = std::atoi(optarg);
+            break;
+        }
         case 'v': c.verbose = true; break;
         case 'h': print_usage(argv[0]); std::exit(0);
         default:  print_usage(argv[0]); std::exit(2);

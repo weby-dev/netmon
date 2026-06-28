@@ -24,6 +24,7 @@
 #include "aggregator.h"
 #include "clickhouse_client.h"
 #include "stream_server.h"
+#include "webhook.h"
 #include "json.h"
 
 #include <atomic>
@@ -147,6 +148,17 @@ int main(int argc, char** argv) {
 
     SecurityEngine sec(cfg);
     Aggregator agg;
+
+    // ---- real-time event webhook to the client's endpoint --------------- //
+    // High-severity events (attacks/scans/floods) are pushed here instantly;
+    // all events are still persisted to ClickHouse below.
+    std::unique_ptr<WebhookSender> event_hook;
+    if (!cfg.event_webhook_url.empty()) {
+        event_hook = std::make_unique<WebhookSender>(
+            cfg.event_webhook_url, cfg.event_webhook_token, cfg.verbose);
+        std::fprintf(stderr, "event webhook: forwarding severity>=%d to %s\n",
+                     cfg.event_webhook_min_severity, cfg.event_webhook_url.c_str());
+    }
 
     // ---- real-time stream server ---------------------------------------- //
     std::unique_ptr<StreamServer> stream;
@@ -375,8 +387,11 @@ int main(int argc, char** argv) {
         // ---- security analysis (push instantly + persist) -------------- //
         auto events = sec.analyze(samples, interval, ts);
         for (auto& ev : events) {
-            ch.add_security(ev);
+            ch.add_security(ev);                                  // always persist
             if (stream) stream->broadcast("security", sec_to_json(ev));
+            // Forward only the important ones to the client's webhook.
+            if (event_hook && (int)ev.severity >= cfg.event_webhook_min_severity)
+                event_hook->enqueue(sec_to_json(ev), ev.category);
             std::fprintf(stderr, "[SECURITY/%s] %s %s%s%s %s\n",
                          severity_name(ev.severity), ev.category.c_str(),
                          ev.src_ip.c_str(),

@@ -33,6 +33,7 @@ add_executable(netmon-collector
     src/aggregator.cpp
     src/clickhouse_client.cpp
     src/stream_server.cpp
+    src/webhook.cpp
 )
 
 # Skeleton header + shared kernel/user header live here. The skeleton is

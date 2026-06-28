@@ -62,6 +62,17 @@ struct Config {
     uint32_t lateral_host_threshold = 10;    // internal hosts on admin ports / src / win
     int      security_window        = 10;    // seconds
 
+    // --- Real-time event webhook (the client's own endpoint) ------------- //
+    // High-severity security events (attacks, scans, floods) are POSTed here
+    // as they happen so the client is alerted immediately. Everything is still
+    // written to ClickHouse — this is an additional "important only" channel.
+    // Empty url disables it.
+    std::string event_webhook_url;           // e.g. https://acme.com/api/webhook
+    std::string event_webhook_token;         // optional shared secret (X-Netmon-Token)
+    // Minimum severity to forward: Info=0 Low=1 Medium=2 High=3 Critical=4.
+    // Default High → attacks/scans/floods go out; Medium-and-below stay in DB.
+    int      event_webhook_min_severity = 3;
+
     // Network ranges considered "internal" for east-west classification
     // (CIDR strings). Defaults cover RFC1918.
     std::vector<std::string> internal_cidrs = {

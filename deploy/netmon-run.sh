@@ -38,5 +38,10 @@ args+=(--bruteforce "${NETMON_BRUTEFORCE:-40}")
 args+=(--dns-rate "${NETMON_DNS_RATE:-300}")
 args+=(--lateral-hosts "${NETMON_LATERAL_HOSTS:-10}")
 
+# Real-time event webhook to the client endpoint (important events only).
+[ -n "${NETMON_EVENT_WEBHOOK_URL:-}" ]   && args+=(--event-webhook-url "${NETMON_EVENT_WEBHOOK_URL}")
+[ -n "${NETMON_EVENT_WEBHOOK_TOKEN:-}" ] && args+=(--event-webhook-token "${NETMON_EVENT_WEBHOOK_TOKEN}")
+[ -n "${NETMON_EVENT_WEBHOOK_MIN_SEVERITY:-}" ] && args+=(--event-webhook-min-severity "${NETMON_EVENT_WEBHOOK_MIN_SEVERITY}")
+
 export NETMON_SCHEMA="${NETMON_SCHEMA:-/etc/netmon/schema.sql}"
 exec /usr/local/bin/netmon-collector "${args[@]}"

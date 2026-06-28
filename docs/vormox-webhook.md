@@ -38,9 +38,18 @@ This document is the contract vormox must implement on the receiving end.
     "database": "netmon",           // string  - database name
     "user": "netmon",               // string  - username
     "password": "•••••••"           // string  - password (secret)
+  },
+  "event_webhook": {                // where the collector sends real-time alerts
+    "url": "https://acme.com/api/webhook", // string - the client's own endpoint
+    "token": "•••••••",             // string - shared token (X-Netmon-Token)
+    "min_severity": "high"          // string - min severity forwarded
   }
 }
 ```
+
+> `event_webhook` describes the **client's** real-time alert endpoint (see
+> `event-webhook.md`). It's informational for vormox — e.g. to display or to
+> provision that endpoint. The collector posts events there directly, not via vormox.
 
 ### Field notes
 
