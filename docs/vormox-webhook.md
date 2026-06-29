@@ -33,8 +33,8 @@ This document is the contract vormox must implement on the receiving end.
   "clickhouse": {
     "host": "203.0.113.10",         // string  - server IP advertised by the installer
     "native_port": 9000,            // number  - ClickHouse native protocol
-    "http_port": 8123,              // number  - ClickHouse HTTP port
-    "http_remote": true,            // bool    - HTTP reachable from the network?
+    "http_port": 8123,              // number  - ClickHouse HTTP port (LOCAL only)
+    "http_remote": false,           // bool    - HTTP is firewalled off; use native :9000
     "database": "netmon",           // string  - database name
     "user": "netmon_ro",            // string  - READ-ONLY user (SELECT only)
     "password": "•••••••",          // string  - password (secret)
@@ -56,8 +56,9 @@ This document is the contract vormox must implement on the receiving end.
 
 - The supplied user is **read-only** (`SELECT` only — no writes, no DDL, and it
   cannot manage users). The full-access account is restricted to the box's
-  localhost and is never sent to you. Connect with either the **native** protocol
-  (`native_port` 9000) or **HTTP** (`http_port` 8123) — `http_remote` is `true`.
+  localhost and is never sent to you. Connect over the **native protocol on
+  `native_port` 9000** (use your ClickHouse client lib). HTTP (`http_port` 8123)
+  is firewalled off the network (`http_remote: false`) — don't rely on it.
 - **`host`** is the IP the server detected for itself. If the customer reaches
   the box via the domain instead, you may connect to `domain:<port>`.
 - **`password`** is a secret — store encrypted, never log it.
@@ -130,13 +131,11 @@ case authenticate by other means (allow-list the source IP, mTLS, etc.).
 
 ## 4. Connecting to ClickHouse from vormox
 
-Both ports are reachable; use whichever your driver prefers:
+Use the **native protocol on port 9000** (HTTP :8123 is firewalled off the network):
 
 - **clickhouse-client:** `clickhouse-client --host <host> --port 9000 --user <user> --password <pw> --database netmon`
 - **Python (clickhouse-driver):** `Client(host, port=9000, user=user, password=pw, database='netmon')`
 - **Go (clickhouse-go):** DSN `clickhouse://user:pw@host:9000/netmon`
-- **Node (@clickhouse/client):** `createClient({ url: 'http://<host>:8123', username, password, database: 'netmon' })`
-- **HTTP / curl:** `curl 'http://<host>:8123/?user=<u>&password=<pw>' --data-binary 'SELECT 1'`
 
 Tables available in the `netmon` database: `flows`, `l7_events`,
 `security_events`, `host_bandwidth`, `app_bandwidth`, `iface_util`, `summary`,

@@ -18,11 +18,12 @@
 #   2. Installs build + tooling dependencies.
 #   3. Places the project in a dedicated dir (/opt/netmon) and removes .git.
 #   4. Builds and installs the collector (binary, wrapper, hardened systemd unit).
-#   5. Installs ClickHouse open to the network (0.0.0.0 on 8123/HTTP + 9000/native),
-#      secured by strong generated passwords (no IP allowlist) so vormox can
-#      connect from anywhere. Creates a collector DB user + an admin user and
-#      sets 7-day retention.
-#   6. Writes all credentials to <dir>/clickhouse.md (chmod 600).
+#   5. Installs ClickHouse with two users: a full "root" user (localhost only) and
+#      a read-only user reachable remotely (what vormox uses, native :9000). Sets
+#      7-day retention.
+#   6. Firewall (nftables): blocks HTTP :8123 from the network (native :9000 stays
+#      open; no IP allowlist). SSH/stream untouched; re-applied on every run.
+#   7. Writes all credentials to <dir>/clickhouse.md (chmod 600).
 #
 # Options:
 #   --dir PATH            install dir (default: /opt/netmon)
@@ -363,30 +364,69 @@ apply_schema_and_retention() {
     --query "ALTER TABLE ${CH_DB}.host_bandwidth_1m MODIFY TTL minute + INTERVAL ${RETENTION_DAYS} DAY" 2>/dev/null || true
 }
 
-# Production firewall (nftables): lock the ClickHouse ports to trusted sources.
-# Implemented as a dedicated, reversible table applied by a boot-time oneshot so
-# Deployment model: ClickHouse is OPEN to the network (bound to 0.0.0.0 on both
-# 8123/HTTP and 9000/native) and secured by strong generated passwords — no IP
-# allowlist — so vormox can connect from anywhere. This makes sure no firewall
-# rule from an earlier run is still blocking those ports.
-ensure_clickhouse_open() {
-  local svc changed=0
-  for svc in netmon-firewall netmon-chfw; do
-    if [ -f "/etc/systemd/system/${svc}.service" ]; then
-      systemctl disable --now "${svc}.service" 2>/dev/null || true
-      rm -f "/etc/systemd/system/${svc}.service"
-      changed=1
-    fi
-  done
-  rm -f /usr/local/bin/netmon-chfw.sh "$INSTALL_DIR/firewall.nft" 2>/dev/null || true
-  command -v nft >/dev/null 2>&1 && nft delete table inet netmon_fw 2>/dev/null || true
-  if [ "$changed" = "1" ]; then
-    systemctl daemon-reload 2>/dev/null || true
-    log "removed a previous netmon firewall rule — ClickHouse is open (password-secured)"
+# Firewall (nftables). Keep the ClickHouse HTTP port (:8123, incl. the /play
+# console) OFF the network — the collector uses it only over loopback, and vormox
+# connects with its native client on :9000. Native :9000 stays open, protected by
+# the password + the read-only user; there is no IP allowlist. SSH (22) and the
+# stream (:8090) are never touched. Applied via a reversible boot-time oneshot and
+# re-applied on every run, so re-running setup.sh refreshes the firewall.
+setup_firewall() {
+  log "configuring firewall (nftables): ClickHouse HTTP :8123 off the network, native :9000 open"
+  # Drop any older iptables-based service from a previous version.
+  if [ -f /etc/systemd/system/netmon-chfw.service ]; then
+    systemctl disable --now netmon-chfw.service 2>/dev/null || true
+    rm -f /etc/systemd/system/netmon-chfw.service /usr/local/bin/netmon-chfw.sh
+  fi
+  if ! command -v nft >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y nftables 2>/dev/null || true
+  fi
+  command -v nft >/dev/null 2>&1 || { warn "  nft unavailable; skipping firewall"; return 0; }
+
+  # Idempotent ruleset: drop inbound :8123 on every interface except loopback.
+  cat > "$INSTALL_DIR/firewall.nft" <<'NFT'
+#!/usr/sbin/nft -f
+add table inet netmon_fw
+delete table inet netmon_fw
+table inet netmon_fw {
+    chain input {
+        type filter hook input priority 0; policy accept;
+        iifname != "lo" tcp dport 8123 drop
+    }
+}
+NFT
+  if ! nft -c -f "$INSTALL_DIR/firewall.nft" >/tmp/netmon-nft.err 2>&1; then
+    warn "  generated nft ruleset failed validation; not applying:"
+    sed 's/^/    /' /tmp/netmon-nft.err >&2
+    return 0
+  fi
+  cat > /etc/systemd/system/netmon-firewall.service <<EOF
+[Unit]
+Description=netmon firewall (block ClickHouse HTTP :8123 from the network)
+After=nftables.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$(command -v nft) -f ${INSTALL_DIR}/firewall.nft
+ExecStop=$(command -v nft) delete table inet netmon_fw
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable netmon-firewall >/dev/null 2>&1 || true
+  if systemctl restart netmon-firewall 2>/dev/null; then
+    log "  firewall applied — :8123 blocked from network; :9000 open (read-only user remotely)"
+  else
+    warn "  could not apply firewall (see: systemctl status netmon-firewall)"
   fi
 }
 
-if [ "$WITH_CLICKHOUSE" = "1" ]; then install_clickhouse; ensure_clickhouse_open; fi
+if [ "$WITH_CLICKHOUSE" = "1" ]; then install_clickhouse; fi
+# Re-apply the firewall on every run where ClickHouse is present (so re-running
+# the installer refreshes/restores it), even with --no-clickhouse.
+if [ "$WITH_CLICKHOUSE" = "1" ] || command -v clickhouse-server >/dev/null 2>&1; then setup_firewall; fi
 
 #############################################################################
 # 4. Build + install the collector
@@ -486,9 +526,11 @@ clickhouse-client --host ${PRIMARY_IP} --port 9000 \\
 # then, e.g.:  SHOW TABLES;   SELECT * FROM security_events ORDER BY ts DESC LIMIT 20;
 \`\`\`
 
-## Ports (open to the network — secured by passwords, no IP allowlist)
-- Native TCP : ${PRIMARY_IP}:9000  — clickhouse-client / native drivers
-- HTTP       : ${PRIMARY_IP}:8123  — HTTP API / curl
+## Ports
+- Native TCP : ${PRIMARY_IP}:9000  — OPEN to the network (vormox / native clients).
+                                     Remotely only the read-only user works.
+- HTTP       : 127.0.0.1:8123      — BLOCKED from the network by the firewall
+                                     (collector + local admin only; no /play remotely).
 
 ## Database
 - Name       : ${CH_DB}
@@ -505,13 +547,19 @@ clickhouse-client --host ${PRIMARY_IP} --port 9000 \\
 - \`${CH_RO_USER}\` is what vormox / remote clients use: read-only, no writes/DDL.
 - The built-in password-less \`default\` user is also restricted to localhost.
 
-## ⚠️ Security
-ClickHouse listens on 0.0.0.0:8123/9000 (no IP allowlist) so vormox can connect
-remotely — but only the **read-only** \`${CH_RO_USER}\` user works from the network.
-The full-access \`${CH_DB_USER}\` ("root") and \`default\` are restricted to
-localhost, so a leaked read-only password can read data but cannot modify it or
-touch other databases. Keep all passwords secret. To further restrict by source
-IP, add host firewall rules for tcp/8123 and tcp/9000 (SSH / stream :8090 separate).
+## ⚠️ Security / firewall (managed: nftables \`netmon_fw\`, service \`netmon-firewall\`)
+- HTTP :8123 (and the /play console) is **blocked from the network** — loopback
+  only. Vormox uses the native protocol, so HTTP isn't needed remotely.
+- Native :9000 is **open** (no IP allowlist), but remotely only the read-only
+  \`${CH_RO_USER}\` user works; the full \`${CH_DB_USER}\` ("root") and \`default\`
+  are localhost-only. A leaked read-only password can read data, not modify it.
+- SSH (22) and the stream (:8090) are never touched. Re-running the installer
+  re-applies this firewall.
+\`\`\`bash
+nft list table inet netmon_fw            # show the rule
+systemctl disable --now netmon-firewall  # remove it (reopen :8123)
+\`\`\`
+Keep all passwords secret.
 EOF
   if [ -n "$EVENT_WEBHOOK_URL" ]; then
     cat >> "$CRED_FILE" <<EOF
@@ -543,7 +591,7 @@ send_webhook() {
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   # Compact single-line JSON (kept byte-exact for signing).
   # vormox connects remotely → it gets the READ-ONLY user, never the root.
-  payload="{\"event\":\"netmon.installed\",\"domain\":\"${DOMAIN}\",\"installed_at\":\"${ts}\",\"clickhouse\":{\"host\":\"${PRIMARY_IP}\",\"native_port\":9000,\"http_port\":8123,\"http_remote\":true,\"database\":\"${CH_DB}\",\"user\":\"${CH_RO_USER}\",\"password\":\"${CH_RO_PASS}\",\"access\":\"read-only\"},\"event_webhook\":{\"url\":\"${EVENT_WEBHOOK_URL}\",\"token\":\"${EVENT_WEBHOOK_TOKEN}\",\"min_severity\":\"${EVENT_MIN_SEVERITY}\"}}"
+  payload="{\"event\":\"netmon.installed\",\"domain\":\"${DOMAIN}\",\"installed_at\":\"${ts}\",\"clickhouse\":{\"host\":\"${PRIMARY_IP}\",\"native_port\":9000,\"http_port\":8123,\"http_remote\":false,\"database\":\"${CH_DB}\",\"user\":\"${CH_RO_USER}\",\"password\":\"${CH_RO_PASS}\",\"access\":\"read-only\"},\"event_webhook\":{\"url\":\"${EVENT_WEBHOOK_URL}\",\"token\":\"${EVENT_WEBHOOK_TOKEN}\",\"min_severity\":\"${EVENT_MIN_SEVERITY}\"}}"
 
   local hdr=(-H "Content-Type: application/json" -H "X-Netmon-Domain: ${DOMAIN}")
   if [ -n "$WEBHOOK_SECRET" ] && command -v python3 >/dev/null 2>&1; then
@@ -586,7 +634,7 @@ cat <<EOF
 Next steps:
   1. Verify NETMON_IFACES in $ENV_DST matches this host's uplinks/bridges/taps.
   2. If you ran a release upgrade above, reboot, then: systemctl restart netmon-collector
-  3. ClickHouse is reachable on ${PRIMARY_IP}:9000 (native) and :8123 (HTTP),
-     secured by the generated passwords in $CRED_FILE. Use strong passwords; the
-     ports are open to the network so vormox can connect.
+  3. Vormox connects to ${PRIMARY_IP}:9000 (native) as the read-only user in
+     $CRED_FILE. HTTP :8123 is firewalled off the network (local only).
+     Re-running this installer re-applies the firewall.
 EOF
