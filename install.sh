@@ -18,10 +18,10 @@
 #   2. Installs build + tooling dependencies.
 #   3. Places the project in a dedicated dir (/opt/netmon) and removes .git.
 #   4. Builds and installs the collector (binary, wrapper, hardened systemd unit).
-#   5. Installs ClickHouse (CLI-only): native port 9000 open for remote
-#      clickhouse-client, HTTP :8123 (and its /play web console) blocked from the
-#      network. Creates a collector DB user + an admin user with generated
-#      passwords, and sets 7-day retention.
+#   5. Installs ClickHouse open to the network (0.0.0.0 on 8123/HTTP + 9000/native),
+#      secured by strong generated passwords (no IP allowlist) so vormox can
+#      connect from anywhere. Creates a collector DB user + an admin user and
+#      sets 7-day retention.
 #   6. Writes all credentials to <dir>/clickhouse.md (chmod 600).
 #
 # Options:
@@ -63,8 +63,13 @@ SKIP_OS_SETUP=0
 NO_START=0
 
 CH_DB="netmon"
-CH_DB_USER="netmon"     # used by the collector
-CH_ADMIN_USER="admin"   # full-access admin user (clickhouse-client / SQL)
+# Two ClickHouse users:
+#   - CH_DB_USER  : full access (read/write/DDL) but LOCALHOST ONLY. Used by the
+#                   collector (local writes) and for admin/CLI on the box. This is
+#                   the "root" — never reachable from the network.
+#   - CH_RO_USER  : SELECT-only, reachable REMOTELY. This is what vormox uses.
+CH_DB_USER="netmon"
+CH_RO_USER="netmon_ro"
 
 # install destinations
 BIN_DST="/usr/local/bin/netmon-collector"
@@ -247,9 +252,9 @@ cd "$INSTALL_DIR"
 #############################################################################
 # 3. ClickHouse: install, secure, make remote, create users
 #############################################################################
-CH_DB_PASS=""; CH_ADMIN_PASS=""
+CH_DB_PASS=""; CH_RO_PASS=""
 install_clickhouse() {
-  CH_DB_PASS="$(gen_pass)"; CH_ADMIN_PASS="$(gen_pass)"
+  CH_DB_PASS="$(gen_pass)"; CH_RO_PASS="$(gen_pass)"
 
   if ! command -v clickhouse-server >/dev/null 2>&1; then
     log "installing ClickHouse (official APT repo)"
@@ -279,28 +284,41 @@ install_clickhouse() {
 </clickhouse>
 XML
 
-  # Users: lock the password-less 'default' user to localhost; create a
-  # collector user and an admin user reachable remotely (with passwords).
+  # Users:
+  #   default      - password-less, localhost only (built-in; kept harmless)
+  #   ${CH_DB_USER}  - full access incl. DDL, LOCALHOST ONLY (collector + admin/root)
+  #   ${CH_RO_USER}  - SELECT-only, reachable from anywhere (vormox / remote reads)
+  # ClickHouse listens on 0.0.0.0, but each user's <networks> ACL decides who can
+  # actually use it: the root user is rejected from non-loopback addresses.
   install -d /etc/clickhouse-server/users.d
   cat > /etc/clickhouse-server/users.d/netmon.xml <<XML
 <clickhouse>
+    <profiles>
+        <netmon_readonly>
+            <!-- readonly=2: SELECT + per-session SET, but no INSERT/CREATE/ALTER/
+                 DROP and the user cannot lower its own readonly. Works with normal
+                 clients (readonly=1 rejects clients that send any setting). -->
+            <readonly>2</readonly>
+            <allow_ddl>0</allow_ddl>
+        </netmon_readonly>
+    </profiles>
     <users>
         <default>
             <networks><ip>127.0.0.1</ip><ip>::1</ip></networks>
         </default>
         <${CH_DB_USER}>
             <password_sha256_hex>$(sha256_hex "$CH_DB_PASS")</password_sha256_hex>
-            <networks><ip>::/0</ip></networks>
-            <profile>default</profile>
-            <quota>default</quota>
-        </${CH_DB_USER}>
-        <${CH_ADMIN_USER}>
-            <password_sha256_hex>$(sha256_hex "$CH_ADMIN_PASS")</password_sha256_hex>
-            <networks><ip>::/0</ip></networks>
+            <networks><ip>127.0.0.1</ip><ip>::1</ip></networks>
             <profile>default</profile>
             <quota>default</quota>
             <access_management>1</access_management>
-        </${CH_ADMIN_USER}>
+        </${CH_DB_USER}>
+        <${CH_RO_USER}>
+            <password_sha256_hex>$(sha256_hex "$CH_RO_PASS")</password_sha256_hex>
+            <networks><ip>::/0</ip></networks>
+            <profile>netmon_readonly</profile>
+            <quota>default</quota>
+        </${CH_RO_USER}>
     </users>
 </clickhouse>
 XML
@@ -315,7 +333,7 @@ XML
   log "waiting for ClickHouse to come up"
   local i ok=0
   for i in $(seq 1 60); do
-    if clickhouse-client --user "$CH_ADMIN_USER" --password "$CH_ADMIN_PASS" --query "SELECT 1" >/dev/null 2>&1; then ok=1; break; fi
+    if clickhouse-client --user "$CH_DB_USER" --password "$CH_DB_PASS" --query "SELECT 1" >/dev/null 2>&1; then ok=1; break; fi
     sleep 1
   done
   if [ "$ok" != "1" ]; then
@@ -332,55 +350,43 @@ apply_schema_and_retention() {
   # Rewrite every TTL in the schema to the requested retention, install it.
   sed -E "s/INTERVAL[[:space:]]+[0-9]+[[:space:]]+DAY/INTERVAL ${RETENTION_DAYS} DAY/g" \
     "$INSTALL_DIR/clickhouse/schema.sql" > "$SCHEMA_DST"
-  clickhouse-client --user "$CH_ADMIN_USER" --password "$CH_ADMIN_PASS" --multiquery < "$SCHEMA_DST" \
+  clickhouse-client --user "$CH_DB_USER" --password "$CH_DB_PASS" --multiquery < "$SCHEMA_DST" \
     || warn "schema apply reported errors (collector will retry at startup)"
 
   # Force retention on any pre-existing tables too (CREATE IF NOT EXISTS won't).
   local t
   for t in flows l7_events security_events host_bandwidth app_bandwidth iface_util summary; do
-    clickhouse-client --user "$CH_ADMIN_USER" --password "$CH_ADMIN_PASS" \
+    clickhouse-client --user "$CH_DB_USER" --password "$CH_DB_PASS" \
       --query "ALTER TABLE ${CH_DB}.${t} MODIFY TTL ts + INTERVAL ${RETENTION_DAYS} DAY" 2>/dev/null || true
   done
-  clickhouse-client --user "$CH_ADMIN_USER" --password "$CH_ADMIN_PASS" \
+  clickhouse-client --user "$CH_DB_USER" --password "$CH_DB_PASS" \
     --query "ALTER TABLE ${CH_DB}.host_bandwidth_1m MODIFY TTL minute + INTERVAL ${RETENTION_DAYS} DAY" 2>/dev/null || true
 }
 
-# CLI-only: block the ClickHouse HTTP port (:8123, which also serves the built-in
-# /play web console) from the network. The collector reaches it over loopback
-# (allowed); remote access is the native CLI on :9000. A tiny boot-time oneshot
-# re-applies the single iptables rule so it survives reboots. SSH (22) and the
-# native port (9000) are untouched.
-restrict_http_remote() {
-  log "blocking ClickHouse HTTP/:8123 (and /play) from the network — CLI-only"
-  cat > /usr/local/bin/netmon-chfw.sh <<'SH'
-#!/usr/bin/env bash
-# Drop remote access to ClickHouse HTTP (8123); loopback (the collector) is allowed.
-set -e
-rule=(INPUT -p tcp --dport 8123 ! -i lo -j DROP)
-iptables -C "${rule[@]}" 2>/dev/null || iptables -I "${rule[@]}"
-SH
-  chmod +x /usr/local/bin/netmon-chfw.sh
-  cat > /etc/systemd/system/netmon-chfw.service <<'EOF'
-[Unit]
-Description=Block ClickHouse HTTP :8123 from the network (netmon CLI-only)
-After=network-online.target clickhouse-server.service
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/netmon-chfw.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload
-  systemctl enable netmon-chfw.service >/dev/null 2>&1 || true
-  systemctl start netmon-chfw.service 2>/dev/null \
-    || warn "  could not apply iptables rule (check 'iptables' is available)"
+# Production firewall (nftables): lock the ClickHouse ports to trusted sources.
+# Implemented as a dedicated, reversible table applied by a boot-time oneshot so
+# Deployment model: ClickHouse is OPEN to the network (bound to 0.0.0.0 on both
+# 8123/HTTP and 9000/native) and secured by strong generated passwords — no IP
+# allowlist — so vormox can connect from anywhere. This makes sure no firewall
+# rule from an earlier run is still blocking those ports.
+ensure_clickhouse_open() {
+  local svc changed=0
+  for svc in netmon-firewall netmon-chfw; do
+    if [ -f "/etc/systemd/system/${svc}.service" ]; then
+      systemctl disable --now "${svc}.service" 2>/dev/null || true
+      rm -f "/etc/systemd/system/${svc}.service"
+      changed=1
+    fi
+  done
+  rm -f /usr/local/bin/netmon-chfw.sh "$INSTALL_DIR/firewall.nft" 2>/dev/null || true
+  command -v nft >/dev/null 2>&1 && nft delete table inet netmon_fw 2>/dev/null || true
+  if [ "$changed" = "1" ]; then
+    systemctl daemon-reload 2>/dev/null || true
+    log "removed a previous netmon firewall rule — ClickHouse is open (password-secured)"
+  fi
 }
 
-if [ "$WITH_CLICKHOUSE" = "1" ]; then install_clickhouse; restrict_http_remote; fi
+if [ "$WITH_CLICKHOUSE" = "1" ]; then install_clickhouse; ensure_clickhouse_open; fi
 
 #############################################################################
 # 4. Build + install the collector
@@ -470,43 +476,42 @@ if [ "$WITH_CLICKHOUSE" = "1" ]; then
 
 ## CLI access
 \`\`\`bash
-# on the server
-clickhouse-client --user ${CH_ADMIN_USER} --password '${CH_ADMIN_PASS}' --database ${CH_DB}
+# on the server: full access (this user is LOCALHOST ONLY)
+clickhouse-client --user ${CH_DB_USER} --password '${CH_DB_PASS}' --database ${CH_DB}
 
-# from a remote machine (native protocol on port 9000)
+# from a remote machine (e.g. vormox): READ-ONLY user
 clickhouse-client --host ${PRIMARY_IP} --port 9000 \\
-  --user ${CH_ADMIN_USER} --password '${CH_ADMIN_PASS}' --database ${CH_DB}
+  --user ${CH_RO_USER} --password '${CH_RO_PASS}' --database ${CH_DB}
 
 # then, e.g.:  SHOW TABLES;   SELECT * FROM security_events ORDER BY ts DESC LIMIT 20;
 \`\`\`
 
-## Ports
-- Native TCP : ${PRIMARY_IP}:9000  — remote clickhouse-client (CLI). OPEN to the network.
-- HTTP       : 127.0.0.1:8123      — used by the collector only. BLOCKED from the
-  network by the netmon-chfw service, so the built-in /play web console is not
-  reachable remotely (CLI-only setup).
+## Ports (open to the network — secured by passwords, no IP allowlist)
+- Native TCP : ${PRIMARY_IP}:9000  — clickhouse-client / native drivers
+- HTTP       : ${PRIMARY_IP}:8123  — HTTP API / curl
 
 ## Database
 - Name       : ${CH_DB}
 - Retention  : ${RETENTION_DAYS} days (rows older than this are auto-deleted via table TTL)
 
 ## Users
-| Purpose                | Username        | Password           |
-|------------------------|-----------------|--------------------|
-| Collector (DB read/write) | ${CH_DB_USER}   | ${CH_DB_PASS}      |
-| Admin (full)              | ${CH_ADMIN_USER}  | ${CH_ADMIN_PASS}     |
+| User            | Access                | Reachable from | Password       |
+|-----------------|-----------------------|----------------|----------------|
+| ${CH_DB_USER}   | full (read/write/DDL) | localhost only | ${CH_DB_PASS}  |
+| ${CH_RO_USER}   | SELECT-only (read)    | anywhere       | ${CH_RO_PASS}  |
 
-The password-less \`default\` user is restricted to localhost only.
+- \`${CH_DB_USER}\` is the "root" — used by the collector and for admin on the box.
+  It is rejected from non-loopback addresses, so it can't be used remotely.
+- \`${CH_RO_USER}\` is what vormox / remote clients use: read-only, no writes/DDL.
+- The built-in password-less \`default\` user is also restricted to localhost.
 
 ## ⚠️ Security
-The native port (9000) is open to the network with password auth. Restrict it to
-trusted IPs with the host firewall, e.g.:
-\`\`\`bash
-iptables -A INPUT -p tcp --dport 9000 -s <your.cidr/24> -j ACCEPT
-iptables -A INPUT -p tcp --dport 9000 -j DROP
-\`\`\`
-To re-expose HTTP/:8123 (and /play) later: \`systemctl disable --now netmon-chfw\`
-then flush the rule: \`iptables -D INPUT -p tcp --dport 8123 ! -i lo -j DROP\`.
+ClickHouse listens on 0.0.0.0:8123/9000 (no IP allowlist) so vormox can connect
+remotely — but only the **read-only** \`${CH_RO_USER}\` user works from the network.
+The full-access \`${CH_DB_USER}\` ("root") and \`default\` are restricted to
+localhost, so a leaked read-only password can read data but cannot modify it or
+touch other databases. Keep all passwords secret. To further restrict by source
+IP, add host firewall rules for tcp/8123 and tcp/9000 (SSH / stream :8090 separate).
 EOF
   if [ -n "$EVENT_WEBHOOK_URL" ]; then
     cat >> "$CRED_FILE" <<EOF
@@ -537,7 +542,8 @@ send_webhook() {
   local ts payload sig
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   # Compact single-line JSON (kept byte-exact for signing).
-  payload="{\"event\":\"netmon.installed\",\"domain\":\"${DOMAIN}\",\"installed_at\":\"${ts}\",\"clickhouse\":{\"host\":\"${PRIMARY_IP}\",\"native_port\":9000,\"http_port\":8123,\"http_remote\":false,\"database\":\"${CH_DB}\",\"user\":\"${CH_DB_USER}\",\"password\":\"${CH_DB_PASS}\"},\"event_webhook\":{\"url\":\"${EVENT_WEBHOOK_URL}\",\"token\":\"${EVENT_WEBHOOK_TOKEN}\",\"min_severity\":\"${EVENT_MIN_SEVERITY}\"}}"
+  # vormox connects remotely → it gets the READ-ONLY user, never the root.
+  payload="{\"event\":\"netmon.installed\",\"domain\":\"${DOMAIN}\",\"installed_at\":\"${ts}\",\"clickhouse\":{\"host\":\"${PRIMARY_IP}\",\"native_port\":9000,\"http_port\":8123,\"http_remote\":true,\"database\":\"${CH_DB}\",\"user\":\"${CH_RO_USER}\",\"password\":\"${CH_RO_PASS}\",\"access\":\"read-only\"},\"event_webhook\":{\"url\":\"${EVENT_WEBHOOK_URL}\",\"token\":\"${EVENT_WEBHOOK_TOKEN}\",\"min_severity\":\"${EVENT_MIN_SEVERITY}\"}}"
 
   local hdr=(-H "Content-Type: application/json" -H "X-Netmon-Domain: ${DOMAIN}")
   if [ -n "$WEBHOOK_SECRET" ] && command -v python3 >/dev/null 2>&1; then
@@ -571,7 +577,7 @@ $(log "install complete")
 EOF
 if [ "$WITH_CLICKHOUSE" = "1" ]; then
 cat <<EOF
-  ClickHouse  : clickhouse-client --user ${CH_ADMIN_USER} --password ... --database ${CH_DB}
+  ClickHouse  : local admin '${CH_DB_USER}' (localhost) · remote read-only '${CH_RO_USER}'
   retention   : ${RETENTION_DAYS} days (creds in $CRED_FILE)
 EOF
 fi
@@ -580,5 +586,7 @@ cat <<EOF
 Next steps:
   1. Verify NETMON_IFACES in $ENV_DST matches this host's uplinks/bridges/taps.
   2. If you ran a release upgrade above, reboot, then: systemctl restart netmon-collector
-  3. Firewall ClickHouse (8123/9000) to trusted IPs — see $CRED_FILE.
+  3. ClickHouse is reachable on ${PRIMARY_IP}:9000 (native) and :8123 (HTTP),
+     secured by the generated passwords in $CRED_FILE. Use strong passwords; the
+     ports are open to the network so vormox can connect.
 EOF

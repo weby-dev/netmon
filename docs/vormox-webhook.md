@@ -32,12 +32,13 @@ This document is the contract vormox must implement on the receiving end.
   "installed_at": "2026-06-28T12:00:00Z", // string - UTC ISO-8601 timestamp
   "clickhouse": {
     "host": "203.0.113.10",         // string  - server IP advertised by the installer
-    "native_port": 9000,            // number  - ClickHouse native protocol (USE THIS)
-    "http_port": 8123,              // number  - HTTP port
-    "http_remote": false,           // bool    - is HTTP reachable from the network?
+    "native_port": 9000,            // number  - ClickHouse native protocol
+    "http_port": 8123,              // number  - ClickHouse HTTP port
+    "http_remote": true,            // bool    - HTTP reachable from the network?
     "database": "netmon",           // string  - database name
-    "user": "netmon",               // string  - username
-    "password": "•••••••"           // string  - password (secret)
+    "user": "netmon_ro",            // string  - READ-ONLY user (SELECT only)
+    "password": "•••••••",          // string  - password (secret)
+    "access": "read-only"           // string  - this user cannot write or run DDL
   },
   "event_webhook": {                // where the collector sends real-time alerts
     "url": "https://acme.com/api/webhook", // string - the client's own endpoint
@@ -53,11 +54,12 @@ This document is the contract vormox must implement on the receiving end.
 
 ### Field notes
 
-- **`clickhouse.native_port` (9000)** is the one to connect with. By default the
-  installer firewalls the HTTP port from the network (`http_remote: false`), so
-  connect using the **native protocol**, not HTTP, unless `http_remote` is `true`.
+- The supplied user is **read-only** (`SELECT` only — no writes, no DDL, and it
+  cannot manage users). The full-access account is restricted to the box's
+  localhost and is never sent to you. Connect with either the **native** protocol
+  (`native_port` 9000) or **HTTP** (`http_port` 8123) — `http_remote` is `true`.
 - **`host`** is the IP the server detected for itself. If the customer reaches
-  the box via the domain instead, you may connect to `domain:native_port`.
+  the box via the domain instead, you may connect to `domain:<port>`.
 - **`password`** is a secret — store encrypted, never log it.
 
 ---
@@ -128,14 +130,13 @@ case authenticate by other means (allow-list the source IP, mTLS, etc.).
 
 ## 4. Connecting to ClickHouse from vormox
 
-Use the native protocol on `native_port` (9000):
+Both ports are reachable; use whichever your driver prefers:
 
 - **clickhouse-client:** `clickhouse-client --host <host> --port 9000 --user <user> --password <pw> --database netmon`
 - **Python (clickhouse-driver):** `Client(host, port=9000, user=user, password=pw, database='netmon')`
 - **Go (clickhouse-go):** DSN `clickhouse://user:pw@host:9000/netmon`
-- **Node (@clickhouse/client):** that client speaks HTTP (8123) — which is
-  firewalled by default; either use a native-protocol driver, or ask the
-  customer to allow your IP to `http_port` and set `http_remote: true`.
+- **Node (@clickhouse/client):** `createClient({ url: 'http://<host>:8123', username, password, database: 'netmon' })`
+- **HTTP / curl:** `curl 'http://<host>:8123/?user=<u>&password=<pw>' --data-binary 'SELECT 1'`
 
 Tables available in the `netmon` database: `flows`, `l7_events`,
 `security_events`, `host_bandwidth`, `app_bandwidth`, `iface_util`, `summary`,
