@@ -49,6 +49,9 @@ private:
         std::unordered_set<uint64_t> dst_ports;   // distinct (dst-host,port) pairs
         std::unordered_set<uint64_t> dst_hosts;   // distinct hashed dst ips
         std::unordered_set<uint64_t> admin_hosts; // internal hosts hit on admin ports
+        // Real dst IPs this source contacted (bounded) so scan/sweep alerts can
+        // name the actual target(s) instead of leaving dst_ip empty.
+        std::unordered_map<std::string, uint32_t> dst_hits;
         uint64_t dns_queries = 0;                 // DNS abuse / tunnelling
         bool     internal = false;                // src is an internal host / VM
         uint64_t window_start = 0;

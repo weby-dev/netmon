@@ -139,6 +139,20 @@ static inline void capped_insert(std::unordered_set<uint64_t>& s, uint64_t v,
 // that we treat as a reflection/amplification flood.
 static constexpr uint64_t kAmpBytesPerSec = 5ull * 1024 * 1024;
 
+// Per-source cap on the number of distinct destination IPs we remember by name
+// (to attribute scans/sweeps to an actual target). Small + bounded.
+static constexpr size_t kDstSampleCap = 64;
+
+// The destination this source contacted most (the primary target to name in an
+// alert). Returns empty if we tracked none.
+static std::string top_target(const std::unordered_map<std::string, uint32_t>& m) {
+    std::string best;
+    uint32_t n = 0;
+    for (const auto& kv : m)
+        if (kv.second > n) { n = kv.second; best = kv.first; }
+    return best;
+}
+
 std::vector<SecurityEvent>
 SecurityEngine::analyze(const std::vector<FlowSample>& flows,
                         double interval_sec, uint64_t now_unix) {
@@ -201,6 +215,9 @@ SecurityEngine::analyze(const std::vector<FlowSample>& flows,
             sp->internal = f.src_internal;
             capped_insert(sp->dst_ports, host_port_key(dst_hash, f.dst_port), port_cap);
             capped_insert(sp->dst_hosts, dst_hash, host_cap);
+            // Remember real targets (bounded) so scan/sweep alerts can name them.
+            if (sp->dst_hits.size() < kDstSampleCap || sp->dst_hits.count(f.dst_ip))
+                sp->dst_hits[f.dst_ip]++;
             if (f.src_internal && f.proto == "UDP" && f.dst_port == 53)
                 sp->dns_queries += (f.d_packets ? f.d_packets : 1);   // ~1 query/pkt
             if (f.src_internal && f.dst_internal && is_admin_port(f.dst_port))
@@ -316,16 +333,22 @@ SecurityEngine::analyze(const std::vector<FlowSample>& flows,
 
     // --- Per-source window detections (cardinality + outbound rate) ----- //
     for (auto& [ip, s] : src_) {
+        // The main destination this source hit — used to name the target on
+        // per-source alerts that otherwise have no single dst_ip.
+        const std::string tdst = top_target(s.dst_hits);
+
         // Port scan: one src touching many distinct dst ports.
         if (s.dst_ports.size() >= cfg_.scan_port_threshold &&
             should_emit("portscan:" + ip, now_unix, window)) {
             SecurityEvent e;
             e.ts_unix = now_unix; e.severity = Severity::High;
-            e.category = "port_scan"; e.src_ip = ip;
+            e.category = "port_scan"; e.src_ip = ip; e.dst_ip = tdst;
             e.metric = s.dst_ports.size();
             e.threshold = cfg_.scan_port_threshold;
             e.detail = "source probed >= " + std::to_string(s.dst_ports.size()) +
-                       " distinct ports in " + std::to_string(window) + "s window";
+                       " distinct ports across " + std::to_string(s.dst_hosts.size()) +
+                       " host(s) in " + std::to_string(window) + "s" +
+                       (tdst.empty() ? "" : "; main target " + tdst);
             out.push_back(std::move(e));
         }
         // Host sweep: one src touching many distinct hosts.
@@ -333,11 +356,12 @@ SecurityEngine::analyze(const std::vector<FlowSample>& flows,
             should_emit("sweep:" + ip, now_unix, window)) {
             SecurityEvent e;
             e.ts_unix = now_unix; e.severity = Severity::High;
-            e.category = "host_sweep"; e.src_ip = ip;
+            e.category = "host_sweep"; e.src_ip = ip; e.dst_ip = tdst;
             e.metric = s.dst_hosts.size();
             e.threshold = cfg_.scan_host_threshold;
             e.detail = "source contacted >= " + std::to_string(s.dst_hosts.size()) +
-                       " distinct hosts in " + std::to_string(window) + "s window";
+                       " distinct hosts in " + std::to_string(window) + "s window" +
+                       (tdst.empty() ? "" : " (e.g. " + tdst + ")");
             out.push_back(std::move(e));
         }
         // DNS abuse / tunnelling: query-rate spike from one internal source.
@@ -345,7 +369,7 @@ SecurityEngine::analyze(const std::vector<FlowSample>& flows,
             should_emit("dnsabuse:" + ip, now_unix, window)) {
             SecurityEvent e;
             e.ts_unix = now_unix; e.severity = Severity::Medium;
-            e.category = "dns_abuse"; e.src_ip = ip;
+            e.category = "dns_abuse"; e.src_ip = ip; e.dst_ip = tdst;
             e.dst_port = 53; e.proto = "UDP";
             e.metric = s.dns_queries; e.threshold = cfg_.dns_rate_threshold;
             e.detail = "high DNS query volume (" + std::to_string(s.dns_queries) +
@@ -357,7 +381,7 @@ SecurityEngine::analyze(const std::vector<FlowSample>& flows,
             should_emit("lateral:" + ip, now_unix, window)) {
             SecurityEvent e;
             e.ts_unix = now_unix; e.severity = Severity::High;
-            e.category = "lateral_movement"; e.src_ip = ip;
+            e.category = "lateral_movement"; e.src_ip = ip; e.dst_ip = tdst;
             e.metric = s.admin_hosts.size();
             e.threshold = cfg_.lateral_host_threshold;
             e.detail = "internal host reached >= " + std::to_string(s.admin_hosts.size()) +
@@ -376,18 +400,19 @@ SecurityEngine::analyze(const std::vector<FlowSample>& flows,
                     should_emit("ddos_out_pps:" + ip, now_unix, window)) {
                     SecurityEvent e;
                     e.ts_unix = now_unix; e.severity = Severity::Critical;
-                    e.category = "ddos_outbound"; e.src_ip = ip;
+                    e.category = "ddos_outbound"; e.src_ip = ip; e.dst_ip = tdst;
                     e.metric = opps; e.threshold = cfg_.ddos_out_pps_threshold;
                     e.detail = "internal host emitting outbound flood: " +
                                std::to_string(opps) + " pps toward " +
-                               std::to_string(s.dst_hosts.size()) + " hosts";
+                               std::to_string(s.dst_hosts.size()) + " hosts" +
+                               (tdst.empty() ? "" : " (e.g. " + tdst + ")");
                     out.push_back(std::move(e));
                 }
                 if (osps >= cfg_.ddos_out_syn_threshold &&
                     should_emit("ddos_out_syn:" + ip, now_unix, window)) {
                     SecurityEvent e;
                     e.ts_unix = now_unix; e.severity = Severity::Critical;
-                    e.category = "ddos_outbound"; e.src_ip = ip;
+                    e.category = "ddos_outbound"; e.src_ip = ip; e.dst_ip = tdst;
                     e.metric = osps; e.threshold = cfg_.ddos_out_syn_threshold;
                     e.detail = "internal host emitting outbound SYN flood: " +
                                std::to_string(osps) + " SYN/s";
