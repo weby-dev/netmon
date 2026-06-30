@@ -84,6 +84,15 @@ struct Config {
         "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"
     };
 
+    // IP reputation files (one IP or CIDR per line; '#' comments allowed).
+    //   blocklist : known-bad addresses -> raises a "blacklist" event on any
+    //               flow touching them. Populate from threat-intel feeds (cron).
+    //   allowlist : trusted addresses (backup servers, monitoring, resolvers,
+    //               app servers) -> exempt from the noisy behavioural detectors
+    //               (exfil, brute force, scans, sweeps, lateral, DNS abuse).
+    std::string blocklist_path;
+    std::string allowlist_path;
+
     bool verbose = false;
 
     static Config parse(int argc, char** argv);

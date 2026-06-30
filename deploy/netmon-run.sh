@@ -33,6 +33,10 @@ args+=(--ddos-out-pps "${NETMON_DDOS_OUT_PPS:-20000}")
 args+=(--ddos-out-syn "${NETMON_DDOS_OUT_SYN:-5000}")
 args+=(--icmp-flood "${NETMON_ICMP_FLOOD:-5000}")
 args+=(--ddos-min-peers "${NETMON_DDOS_MIN_PEERS:-5}")
+
+# IP reputation lists (optional; only passed if set and the file exists).
+[ -n "${NETMON_BLOCKLIST:-}" ] && [ -f "${NETMON_BLOCKLIST}" ] && args+=(--blocklist "${NETMON_BLOCKLIST}")
+[ -n "${NETMON_ALLOWLIST:-}" ] && [ -f "${NETMON_ALLOWLIST}" ] && args+=(--allowlist "${NETMON_ALLOWLIST}")
 args+=(--scan-ports "${NETMON_SCAN_PORTS:-50}")
 args+=(--scan-hosts "${NETMON_SCAN_HOSTS:-50}")
 args+=(--bruteforce "${NETMON_BRUTEFORCE:-40}")

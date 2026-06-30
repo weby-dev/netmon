@@ -30,7 +30,9 @@ bool ClickHouseClient::execute(const std::string& sql) {
     if (!curl) return false;
 
     std::string resp;
-    std::string url = cfg_.clickhouse_url;
+    // skip-unknown-fields lets an INSERT tolerate a table that predates newer
+    // columns (e.g. src_bad/dst_bad) instead of failing the whole batch.
+    std::string url = cfg_.clickhouse_url + "/?input_format_skip_unknown_fields=1";
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, sql.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)sql.size());
@@ -117,6 +119,8 @@ void ClickHouseClient::add_flow(const FlowSample& f) {
     j.num("flow_start", f.first_seen_unix);
     j.num("flow_end", f.last_seen_unix);
     j.num("closed", f.is_closed ? 1 : 0);
+    j.num("src_bad", f.src_bad ? 1 : 0);   // IP reputation: source on blocklist
+    j.num("dst_bad", f.dst_bad ? 1 : 0);   // IP reputation: dest on blocklist
 
     std::lock_guard<std::mutex> lk(mtx_);
     flows_.push_back(j.done());

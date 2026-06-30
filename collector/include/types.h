@@ -28,6 +28,11 @@ struct FlowSample {
     std::string proto;                         // TCP/UDP/ICMP/...
     AppInfo     app;
     bool        src_internal = false, dst_internal = false;
+    // IP reputation: src/dst matched the operator blocklist (known-bad) or the
+    // trusted allowlist (backup/monitoring/resolver/etc. — exempt from the
+    // false-positive-prone behavioural detectors).
+    bool        src_bad = false, dst_bad = false;
+    bool        src_trusted = false, dst_trusted = false;
     std::string direction;       // "north-south" | "east-west"
 
     // Wall-clock derived from boot time + ktime (UTC unix seconds).
@@ -45,7 +50,7 @@ struct SecurityEvent {
     std::string category;     // "ddos" | "ddos_outbound" | "icmp_flood" |
                               // "port_scan" | "host_sweep" | "stealth_scan" |
                               // "bruteforce" | "lateral_movement" | "dns_abuse" |
-                              // "amplification" | "cryptomining" |
+                              // "amplification" | "cryptomining" | "blacklist" |
                               // "suspicious_conn" | "anomaly"
     std::string src_ip;
     std::string dst_ip;

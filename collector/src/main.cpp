@@ -120,6 +120,24 @@ static std::string load_schema() {
     return {};
 }
 
+// Load an IP/CIDR list file (one entry per line, '#' comments, blanks ignored).
+static std::vector<std::string> load_cidr_file(const std::string& path) {
+    std::vector<std::string> out;
+    if (path.empty()) return out;
+    std::ifstream f(path);
+    if (!f) { std::fprintf(stderr, "warning: could not open IP list %s\n", path.c_str()); return out; }
+    std::string line;
+    while (std::getline(f, line)) {
+        auto h = line.find('#'); if (h != std::string::npos) line = line.substr(0, h);
+        size_t a = line.find_first_not_of(" \t\r\n");
+        if (a == std::string::npos) continue;
+        size_t b = line.find_last_not_of(" \t\r\n");
+        out.push_back(line.substr(a, b - a + 1));
+    }
+    std::fprintf(stderr, "loaded %zu IP-list entries from %s\n", out.size(), path.c_str());
+    return out;
+}
+
 struct PrevState {
     nm_flow_stats stats;
     bool          seen_this_round = false;
@@ -134,6 +152,8 @@ int main(int argc, char** argv) {
     std::signal(SIGPIPE, SIG_IGN);    // stream writes use MSG_NOSIGNAL anyway
 
     CidrSet internal(cfg.internal_cidrs);
+    CidrSet blocklist(load_cidr_file(cfg.blocklist_path));   // known-bad IPs
+    CidrSet allowlist(load_cidr_file(cfg.allowlist_path));   // trusted IPs
 
     BpfLoader bpf(cfg);
     if (!bpf.load_and_attach()) {
@@ -331,6 +351,10 @@ int main(int argc, char** argv) {
             s.app = classify_app(e.key.protocol, s.src_port, s.dst_port);
             s.src_internal = internal.contains(e.key.src_addr, e.key.family);
             s.dst_internal = internal.contains(e.key.dst_addr, e.key.family);
+            s.src_bad     = blocklist.contains(e.key.src_addr, e.key.family);
+            s.dst_bad     = blocklist.contains(e.key.dst_addr, e.key.family);
+            s.src_trusted = allowlist.contains(e.key.src_addr, e.key.family);
+            s.dst_trusted = allowlist.contains(e.key.dst_addr, e.key.family);
             s.direction = (s.src_internal && s.dst_internal) ? "east-west" : "north-south";
             s.first_seen_unix = ktime_to_unix(e.stats.first_seen_ns);
             s.last_seen_unix  = ktime_to_unix(e.stats.last_seen_ns);

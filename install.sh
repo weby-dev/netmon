@@ -362,6 +362,13 @@ apply_schema_and_retention() {
   done
   clickhouse-client --user "$CH_DB_USER" --password "$CH_DB_PASS" \
     --query "ALTER TABLE ${CH_DB}.host_bandwidth_1m MODIFY TTL minute + INTERVAL ${RETENTION_DAYS} DAY" 2>/dev/null || true
+
+  # Add IP-reputation columns to a pre-existing flows table (no-op if present).
+  local col
+  for col in "src_bad UInt8 DEFAULT 0" "dst_bad UInt8 DEFAULT 0"; do
+    clickhouse-client --user "$CH_DB_USER" --password "$CH_DB_PASS" \
+      --query "ALTER TABLE ${CH_DB}.flows ADD COLUMN IF NOT EXISTS ${col}" 2>/dev/null || true
+  done
 }
 
 # Firewall (nftables). Keep the ClickHouse HTTP port (:8123, incl. the /play
@@ -476,6 +483,15 @@ if [ "$WITH_CLICKHOUSE" = "1" ]; then
   set_env NETMON_CLICKHOUSE_PASS "$CH_DB_PASS"
 fi
 set_env NETMON_SCHEMA "$SCHEMA_DST"
+
+# IP reputation lists: seed empty templates (operator fills the blocklist from a
+# threat feed; allowlist with backup/monitoring/resolver/app-server IPs).
+for f in /etc/netmon/blocklist.txt /etc/netmon/allowlist.txt; do
+  [ -f "$f" ] || printf '# %s — one IP or CIDR per line; "#" comments allowed.\n' "$(basename "$f")" > "$f"
+done
+set_env NETMON_BLOCKLIST /etc/netmon/blocklist.txt
+set_env NETMON_ALLOWLIST /etc/netmon/allowlist.txt
+
 if [ -n "$DOMAIN" ]; then set_env NETMON_DOMAIN "$DOMAIN"; fi
 if [ -n "$EVENT_WEBHOOK_URL" ]; then
   set_env NETMON_EVENT_WEBHOOK_URL          "$EVENT_WEBHOOK_URL"

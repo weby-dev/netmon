@@ -203,6 +203,22 @@ SecurityEngine::analyze(const std::vector<FlowSample>& flows,
         const bool is_icmp = (f.proto == "ICMP" || f.proto == "ICMPv6");
         const uint64_t dst_hash = hash_ip(f.dst_ip);
 
+        // ---- IP reputation: any flow touching a blocklisted address ----- //
+        if (f.src_bad || f.dst_bad) {
+            std::string k = "blacklist:" + (f.src_bad ? f.src_ip : f.dst_ip);
+            if (should_emit(k, now_unix, window)) {
+                SecurityEvent e;
+                e.ts_unix = now_unix; e.severity = Severity::High;
+                e.category = "blacklist";
+                e.src_ip = f.src_ip; e.dst_ip = f.dst_ip;
+                e.dst_port = f.dst_port; e.proto = f.proto;
+                e.detail = std::string("flow with blacklisted ") +
+                           (f.src_bad && f.dst_bad ? "source+destination" :
+                            f.src_bad ? "source" : "destination") + " IP";
+                out.push_back(std::move(e));
+            }
+        }
+
         // ---- Persistent windowed cardinality (bounded) ----------------- //
         SrcState* sp = nullptr;
         if (auto it = src_.find(f.src_ip); it != src_.end()) {
@@ -213,19 +229,24 @@ SecurityEngine::analyze(const std::vector<FlowSample>& flows,
         }
         if (sp) {
             sp->internal = f.src_internal;
-            capped_insert(sp->dst_ports, host_port_key(dst_hash, f.dst_port), port_cap);
-            capped_insert(sp->dst_hosts, dst_hash, host_cap);
             // Remember real targets (bounded) so scan/sweep alerts can name them.
             if (sp->dst_hits.size() < kDstSampleCap || sp->dst_hits.count(f.dst_ip))
                 sp->dst_hits[f.dst_ip]++;
-            if (f.src_internal && f.proto == "UDP" && f.dst_port == 53)
-                sp->dns_queries += (f.d_packets ? f.d_packets : 1);   // ~1 query/pkt
-            if (f.src_internal && f.dst_internal && is_admin_port(f.dst_port))
-                capped_insert(sp->admin_hosts, dst_hash, admin_cap);
+            // Trusted sources (backup/monitoring/scanners/resolvers) are exempt
+            // from the scan / sweep / DNS-abuse / lateral / outbound-flood state.
+            if (!f.src_trusted) {
+                capped_insert(sp->dst_ports, host_port_key(dst_hash, f.dst_port), port_cap);
+                capped_insert(sp->dst_hosts, dst_hash, host_cap);
+                if (f.src_internal && f.proto == "UDP" && f.dst_port == 53)
+                    sp->dns_queries += (f.d_packets ? f.d_packets : 1);   // ~1 query/pkt
+                if (f.src_internal && f.dst_internal && is_admin_port(f.dst_port))
+                    capped_insert(sp->admin_hosts, dst_hash, admin_cap);
+            }
         }
 
         // ---- Brute force: connection attempts per (src,dst,svc-port) --- //
-        if (f.is_new && f.proto == "TCP" && is_service_port(f.dst_port)) {
+        if (f.is_new && f.proto == "TCP" && is_service_port(f.dst_port) &&
+            !f.src_trusted && !f.dst_trusted) {
             std::string ak = f.src_ip + "|" + f.dst_ip + "|" + std::to_string(f.dst_port);
             AuthState* ap = nullptr;
             if (auto it = auth_.find(ak); it != auth_.end()) {
@@ -261,7 +282,7 @@ SecurityEngine::analyze(const std::vector<FlowSample>& flows,
         // (tcp_flags is OR-accumulated across the flow, so this only fires
         // cleanly on the short, SYN-less flows that scanners produce).
         if (f.proto == "TCP" && f.is_new && f.d_packets <= 3 &&
-            f.stats.syn_count == 0) {
+            f.stats.syn_count == 0 && !f.src_trusted) {
             uint32_t fl = f.stats.tcp_flags & 0x3f;   // FIN..URG flag bits
             const char* kind = nullptr;
             if      (fl == 0)                              kind = "NULL";
@@ -282,7 +303,8 @@ SecurityEngine::analyze(const std::vector<FlowSample>& flows,
         }
 
         // Crypto-mining: internal host dialing out to a known pool port.
-        if (f.is_new && f.src_internal && !f.dst_internal && is_mining_port(f.dst_port)) {
+        if (f.is_new && f.src_internal && !f.dst_internal && !f.dst_trusted &&
+            is_mining_port(f.dst_port)) {
             std::string k = "mining:" + f.src_ip + ":" + f.dst_ip + ":" +
                             std::to_string(f.dst_port);
             if (should_emit(k, now_unix, window)) {
@@ -299,7 +321,7 @@ SecurityEngine::analyze(const std::vector<FlowSample>& flows,
 
         // Suspicious destination port from an internal host -> external.
         if (f.is_new && is_suspicious_port(f.dst_port) &&
-            f.src_internal && !f.dst_internal) {
+            f.src_internal && !f.dst_internal && !f.dst_trusted) {
             std::string k = "suspport:" + f.src_ip + ":" + f.dst_ip + ":" +
                             std::to_string(f.dst_port);
             if (should_emit(k, now_unix, window)) {
@@ -314,8 +336,10 @@ SecurityEngine::analyze(const std::vector<FlowSample>& flows,
             }
         }
 
-        // Possible data exfiltration: large internal->external transfer.
-        if (f.src_internal && !f.dst_internal && f.d_bytes > 50ull * 1024 * 1024) {
+        // Possible data exfiltration: large internal->external transfer
+        // (trusted destinations such as backup/cloud targets are exempt).
+        if (f.src_internal && !f.dst_internal && !f.dst_trusted &&
+            f.d_bytes > 50ull * 1024 * 1024) {
             std::string k = "exfil:" + f.src_ip + ":" + f.dst_ip;
             if (should_emit(k, now_unix, window)) {
                 SecurityEvent e;

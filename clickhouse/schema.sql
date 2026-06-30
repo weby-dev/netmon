@@ -26,7 +26,9 @@ CREATE TABLE IF NOT EXISTS netmon.flows
     syn_count     UInt32,
     flow_start    DateTime,
     flow_end      DateTime,
-    closed        UInt8
+    closed        UInt8,
+    src_bad       UInt8 DEFAULT 0,             -- source IP on the reputation blocklist
+    dst_bad       UInt8 DEFAULT 0              -- dest   IP on the reputation blocklist
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)

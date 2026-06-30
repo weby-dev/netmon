@@ -32,6 +32,8 @@ void Config::print_usage(const char* prog) {
 "      --icmp-flood <n>       ICMP flood pps threshold (default: 5000)\n"
 "      --ddos-min-peers <n>   Min distinct sources/dests for a DDoS (default: 5;\n"
 "                             excludes backups/speedtests; 1 disables the gate)\n"
+"      --blocklist <file>     IP/CIDR blocklist (one per line) -> 'blacklist' events\n"
+"      --allowlist <file>     trusted IP/CIDR list, exempt from noisy detectors\n"
 "      --scan-ports <n>       Port-scan distinct-port threshold (default: 50)\n"
 "      --scan-hosts <n>       Sweep distinct-host threshold (default: 50)\n"
 "      --bruteforce <n>       Brute-force attempts/window threshold (default: 40)\n"
@@ -56,7 +58,7 @@ Config Config::parse(int argc, char** argv) {
         OPT_DDOS_OUT_PPS, OPT_DDOS_OUT_SYN, OPT_ICMP_FLOOD,
         OPT_BRUTEFORCE, OPT_DNS_RATE, OPT_LATERAL_HOSTS,
         OPT_EVENT_WH_URL, OPT_EVENT_WH_TOKEN, OPT_EVENT_WH_SEV,
-        OPT_DDOS_MIN_PEERS
+        OPT_DDOS_MIN_PEERS, OPT_BLOCKLIST, OPT_ALLOWLIST
     };
     static const struct option longopts[] = {
         {"iface",       required_argument, nullptr, 'i'},
@@ -77,6 +79,8 @@ Config Config::parse(int argc, char** argv) {
         {"ddos-out-syn",required_argument, nullptr, OPT_DDOS_OUT_SYN},
         {"icmp-flood",  required_argument, nullptr, OPT_ICMP_FLOOD},
         {"ddos-min-peers", required_argument, nullptr, OPT_DDOS_MIN_PEERS},
+        {"blocklist",   required_argument, nullptr, OPT_BLOCKLIST},
+        {"allowlist",   required_argument, nullptr, OPT_ALLOWLIST},
         {"scan-ports",  required_argument, nullptr, OPT_SCAN_PORTS},
         {"scan-hosts",  required_argument, nullptr, OPT_SCAN_HOSTS},
         {"bruteforce",  required_argument, nullptr, OPT_BRUTEFORCE},
@@ -111,6 +115,8 @@ Config Config::parse(int argc, char** argv) {
         case OPT_DDOS_OUT_SYN: c.ddos_out_syn_threshold = std::strtoull(optarg, nullptr, 10); break;
         case OPT_ICMP_FLOOD: c.icmp_flood_threshold = std::strtoull(optarg, nullptr, 10); break;
         case OPT_DDOS_MIN_PEERS: c.ddos_min_peers = std::strtoul(optarg, nullptr, 10); break;
+        case OPT_BLOCKLIST: c.blocklist_path = optarg; break;
+        case OPT_ALLOWLIST: c.allowlist_path = optarg; break;
         case OPT_SCAN_PORTS: c.scan_port_threshold = std::strtoul(optarg, nullptr, 10); break;
         case OPT_SCAN_HOSTS: c.scan_host_threshold = std::strtoul(optarg, nullptr, 10); break;
         case OPT_BRUTEFORCE: c.bruteforce_threshold = std::strtoul(optarg, nullptr, 10); break;
