@@ -55,6 +55,11 @@ struct Config {
     uint64_t ddos_out_pps_threshold = 20000; // OUTBOUND pps from one internal src (VM)
     uint64_t ddos_out_syn_threshold = 5000;  // OUTBOUND SYN/sec from one internal src
     uint64_t icmp_flood_threshold   = 5000;  // ICMP packets/sec to one dst
+    // A volumetric flood is only called a *D*DoS when it's distributed: require
+    // at least this many distinct sources (inbound) / destinations (outbound).
+    // This keeps single-/few-peer high-bandwidth transfers (backups, speedtests,
+    // big downloads) from being flagged as floods. Set 1 to disable the gate.
+    uint32_t ddos_min_peers         = 5;
     uint32_t scan_port_threshold    = 50;    // distinct dst ports / src / window
     uint32_t scan_host_threshold    = 50;    // distinct dst hosts / src / window
     uint32_t bruteforce_threshold   = 40;    // conn attempts / (src->dst:svc) / window

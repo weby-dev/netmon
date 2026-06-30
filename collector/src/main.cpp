@@ -190,8 +190,11 @@ int main(int argc, char** argv) {
     });
 
     // ---- liveness watchdog: restart-on-hang ----------------------------- //
+    // Comfortably longer than the worst-case (now bounded) ClickHouse flush, so a
+    // merely-slow DB is a self-recovering stall, not a watchdog abort. Only a true
+    // hang (no scrape tick for this long) trips it -> abort -> systemd restart.
     const uint64_t watchdog_timeout =
-        std::max<uint64_t>(60, (uint64_t)cfg.flow_poll_interval * 10);
+        std::max<uint64_t>(180, (uint64_t)cfg.flow_poll_interval * 30);
     g_heartbeat.store(now_unix());
     std::thread watchdog([&]() {
         while (g_running.load()) {

@@ -36,7 +36,12 @@ bool ClickHouseClient::execute(const std::string& sql) {
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)sql.size());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_sink);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    // Bound how long a slow/stuck ClickHouse can block the caller. NOSIGNAL is
+    // required because the collector is multi-threaded (libcurl otherwise uses
+    // signals for timeouts, which is unsafe off the main thread).
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 
     struct curl_slist* hdrs = nullptr;
     if (!cfg_.clickhouse_user.empty()) {

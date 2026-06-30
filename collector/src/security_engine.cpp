@@ -396,7 +396,10 @@ SecurityEngine::analyze(const std::vector<FlowSample>& flows,
             if (rit != srate.end()) {
                 uint64_t opps = (uint64_t)(rit->second.pkts / interval_sec);
                 uint64_t osps = (uint64_t)(rit->second.syns / interval_sec);
+                // Require fan-out to many destinations: a backup/upload to one
+                // server is high-pps but single-destination, not a flood.
                 if (opps >= cfg_.ddos_out_pps_threshold &&
+                    s.dst_hosts.size() >= cfg_.ddos_min_peers &&
                     should_emit("ddos_out_pps:" + ip, now_unix, window)) {
                     SecurityEvent e;
                     e.ts_unix = now_unix; e.severity = Severity::Critical;
@@ -429,7 +432,10 @@ SecurityEngine::analyze(const std::vector<FlowSample>& flows,
         uint64_t ipps = (uint64_t)(dr.icmp / interval_sec);
         uint64_t abps = (uint64_t)(dr.amp_bytes / interval_sec);
 
+        // Require the flood to be DISTRIBUTED (many sources). A single big
+        // transfer (backup, speedtest, download) is high-pps but few-source.
         if (pps >= cfg_.ddos_pps_threshold &&
+            dr.srcs.size() >= cfg_.ddos_min_peers &&
             should_emit("ddos_pps:" + ip, now_unix, window)) {
             SecurityEvent e;
             e.ts_unix = now_unix; e.severity = Severity::Critical;
