@@ -1,5 +1,9 @@
 # netmon — XDP/eBPF traffic monitor for Proxmox
 
+> 📖 **Full documentation lives in [`docs/`](docs/README.md)** — architecture,
+> install, configuration reference, detection engine, data model, security,
+> webhooks, IP reputation, operations, and the [firewall guide](docs/firewall.md).
+
 Flow-level network monitoring built on **XDP/eBPF** (kernel data path) and a
 **C++ collector** (userspace) that exposes the data two ways:
 

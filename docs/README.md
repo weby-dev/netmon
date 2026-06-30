@@ -284,6 +284,9 @@ only the read-only user works remotely.
 - **SSH (22)** and the **stream (:8090)** are never touched. Re-running the
   installer re-applies the firewall.
 
+To **customise the firewall** (lock `:9000` to specific source IPs, open `:8123`,
+restrict the stream, add your own rules, or remove it) see **[firewall.md](firewall.md)**.
+
 > ⚠️ The native protocol on `:9000` is **plaintext** by default. For remote reads
 > over an untrusted network, terminate over TLS (`:9440`) or a VPN — see §15.
 
@@ -317,7 +320,7 @@ details to `--webhook-url` (default `https://vormox.com/api/webhook`).
   `X-Netmon-Signature: sha256=<hmac>` (when `--webhook-secret` is set).
 - Body includes `clickhouse` (host, `native_port` 9000, `http_remote:false`, db,
   the **read-only** `netmon_ro` user + password) and the `event_webhook` block.
-- Full contract: **`docs/vormox-webhook.md`**.
+- Full contract: **[vormox-webhook.md](vormox-webhook.md)**.
 
 ### 9.2 Events → client domain (runtime, real-time)
 High-severity events are POSTed to `https://<domain>/api/webhook` as they happen.
@@ -325,7 +328,7 @@ High-severity events are POSTed to `https://<domain>/api/webhook` as they happen
 - Only severity ≥ `min-severity` (default `high`) is sent; everything is in CH.
 - Fire-and-forget, bounded queue (drops oldest if the endpoint is down — the DB
   remains source of truth), ~8 s timeout, no retry.
-- Full contract for the client endpoint: **`docs/event-webhook.md`**.
+- Full contract for the client endpoint: **[event-webhook.md](event-webhook.md)**.
 
 ---
 
@@ -453,6 +456,8 @@ deploy/
   install-clickhouse.sh     standalone CH installer
 config/collector.env      env template (installed to /etc/netmon/collector.env)
 docs/
+  README.md                 this document (full reference)
+  firewall.md               how to view / modify / remove the firewall
   vormox-webhook.md         registration webhook contract
   event-webhook.md          client event webhook contract
 setup.sh                  curl-able bootstrap (APT repair + git + clone)
